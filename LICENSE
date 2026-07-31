@@ -1,0 +1,57 @@
+MIT License
+
+Copyright (c) 2026 Mega Brain Games BR (estudio ficticio) — projeto didatico
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Sobre o alcance desta licenca / Scope of this license
+
+**PT-BR.** A licenca MIT acima cobre o **CODIGO** e os demais arquivos-fonte
+deste repositorio — o motor, os shaders, os materiais e texturas procedurais,
+a sintese de audio, os charts e as composicoes originais geradas por codigo.
+Tudo isso e original deste projeto: nao ha neste repositorio nenhuma gravacao,
+composicao, arte, marca ou trecho de codigo de terceiros, tirando a biblioteca
+Three.js em `vendor/`, que tem licenca MIT propria e os avisos de copyright dos
+seus autores preservados nos arquivos.
+
+"Mega Brain Games BR" e um **estudio ficticio**, criado como piada para este
+projeto didatico. Nao existe empresa, produto comercial nem entidade juridica
+por tras do nome.
+
+As **homenagens a artistas reais** — Ximbinha, Mestre Vieira, Aldo Sena, Beto
+Metralha, Pinduca e os demais mestres da guitarrada paraense e da musica
+brasileira citados no jogo e nos creditos — sao **mencoes textuais de carater
+educativo e afetivo**. Nao implicam vinculo, patrocinio, afiliacao,
+representacao, endosso nem qualquer relacao comercial com esses artistas, suas
+bandas, gravadoras ou herdeiros, e nao licenciam nenhum direito sobre suas
+obras. Nenhum nome de artista e usado como marca, e nenhuma musica de terceiros
+e reproduzida: as seis faixas do jogo sao composicoes originais sintetizadas em
+tempo real. "Guitar Hero", "Rock Band" e "Clone Hero" sao citados apenas como
+referencia de genero e pertencem aos seus respectivos titulares, sem qualquer
+afiliacao com este projeto.
+
+**EN.** The MIT license above covers the **CODE** and source files of this
+repository. All game content is procedurally generated and original to this
+project; no third-party recordings, compositions, artwork or trademarks are
+included (except the Three.js library in `vendor/`, under its own MIT license).
+"Mega Brain Games BR" is a fictional studio. References to real musicians are
+educational tributes only and imply no affiliation, sponsorship, endorsement or
+commercial relationship of any kind.

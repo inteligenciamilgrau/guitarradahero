@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Guitarrada Hero</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #05060a; overflow: hidden;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #gh-root { position: fixed; inset: 0; }
+  #gh-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* camada de UI em HTML por cima do WebGL — texto nitido de verdade */
+  #gh-ui { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  #gh-ui .clickable { pointer-events: auto; }
+  /* tela de erro — o jogo NUNCA fica preto em silencio */
+  #gh-fatal {
+    position: absolute; inset: 0; display: none; z-index: 9999;
+    background: rgba(10,0,0,.94); color: #ff5a5a; padding: 6vh 6vw;
+    font: 600 15px/1.55 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap;
+    overflow: auto;
+  }
+  #gh-fatal h1 { font: 800 30px/1.2 "Segoe UI", sans-serif; color: #ff2d2d; margin: 0 0 18px; letter-spacing: .02em; }
+</style>
+</head>
+<body>
+<div id="gh-root">
+  <canvas id="gh-canvas"></canvas>
+  <div id="gh-ui"></div>
+  <div id="gh-fatal"><h1>GH_ERROR</h1><div id="gh-fatal-msg"></div></div>
+</div>
+
+<script>
+// Captura de erro o mais cedo possivel — antes de qualquer modulo carregar.
+window.__GH_ERRORS = [];
+window.__GH_fatal = function (msg) {
+  window.__GH_ERRORS.push(String(msg));
+  try {
+    document.title = 'GH_ERROR: ' + String(msg).slice(0, 160);
+    var el = document.getElementById('gh-fatal');
+    var m  = document.getElementById('gh-fatal-msg');
+    if (el && m) { m.textContent = window.__GH_ERRORS.join('\n\n'); el.style.display = 'block'; }
+  } catch (e) {}
+};
+window.addEventListener('error', function (e) {
+  window.__GH_fatal((e.message || 'erro') + '\n  em ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+});
+window.addEventListener('unhandledrejection', function (e) {
+  window.__GH_fatal('promise rejeitada: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+});
+</script>
+
+<!-- ============================ Three.js r147 (UMD, vendorizado) ============================ -->
+<script src="vendor/three.min.js"></script>
+
+<script>
+/* ---------------------------------------------------------------------------
+   GERENCIAMENTO DE COR — decisao de INTEGRACAO, vale para TODOS os modulos.
+
+   O r147 nasce com legacyMode = true: nenhuma cor sRGB e convertida para linear
+   na ENTRADA, mas renderer.outputEncoding converte na SAIDA. O resultado e uma
+   imagem lavada — as 5 raias perdem separacao (o vermelho vira salmao, o verde
+   vira menta), que e exatamente o que o contrato proibe na barra de qualidade.
+
+   Ligamos aqui, e NAO dentro de um modulo, porque a conversao acontece no
+   momento em que cada THREE.Color e construido: src/core/palette.js cria a
+   paleta inteira na hora do load, entao a flag precisa estar de pe ANTES do
+   primeiro <script src="src/...">. Ligar isto de dentro do engine deixaria
+   metade da cena convertida e a outra metade nao — foi por isso que o agente
+   de ENGINE (corretamente) recusou fazer de la.
+
+   Verificado lado a lado com o pipeline completo (Engine + Materials + Palette,
+   composer e grade inclusos): a calibracao do grade do engine (uGamma 0.66 /
+   uBlack 0.03 / uContrast 0.24) continua valendo e fica ate melhor — pretos
+   mais fundos e raias separadas. Nao mexa nisto sem refazer a comparacao.
+   --------------------------------------------------------------------------- */
+try { if (window.THREE && THREE.ColorManagement) THREE.ColorManagement.legacyMode = false; } catch (e) {}
+</script>
+
+<script src="vendor/Pass.js"></script>
+<script src="vendor/CopyShader.js"></script>
+<script src="vendor/ShaderPass.js"></script>
+<script src="vendor/MaskPass.js"></script>
+<script src="vendor/EffectComposer.js"></script>
+<script src="vendor/RenderPass.js"></script>
+<script src="vendor/LuminosityHighPassShader.js"></script>
+<script src="vendor/UnrealBloomPass.js"></script>
+<script src="vendor/SMAAShader.js"></script>
+<script src="vendor/SMAAPass.js"></script>
+<script src="vendor/FXAAShader.js"></script>
+
+<!-- ================================ Guitarrada Hero ================================ -->
+<script src="src/core/util.js"></script>
+<script src="src/core/palette.js"></script>
+<!-- Arte gerada externamente (opcional). Gerado por tools/embed_art.sh a partir
+     de art_source/. Se estiver vazio, o jogo usa 100% texturas procedurais. -->
+<script src="src/content/art.js"></script>
+<script src="src/visual/materials.js"></script>
+<script src="src/core/engine.js"></script>
+<script src="src/core/input.js"></script>
+<script src="src/audio/audio.js"></script>
+<script src="src/audio/synth.js"></script>
+<script src="src/audio/conductor.js"></script>
+<script src="src/content/songs.js"></script>
+<script src="src/gameplay/chart.js"></script>
+<script src="src/gameplay/scoring.js"></script>
+<script src="src/visual/highway.js"></script>
+<script src="src/visual/notes.js"></script>
+<script src="src/visual/effects.js"></script>
+<script src="src/visual/stage.js"></script>
+<script src="src/ui/hud.js"></script>
+<script src="src/ui/menus.js"></script>
+<script src="src/gameplay/game.js"></script>
+<script src="src/main.js"></script>
+</body>
+</html>

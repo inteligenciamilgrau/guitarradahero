@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# GUITARRADA HERO — .gitignore
+#
+# SO O ESSENCIAL PARA O JOGO RODAR vai para o repositorio / GitHub Pages:
+#   index.html, src/, vendor/, README.md, LICENSE, .nojekyll, .gitignore
+# (todos auditados: nenhum caminho absoluto de maquina, nenhum nome de
+#  usuario, nenhuma URL externa.)
+# TUDO que e de DESENVOLVIMENTO fica local. Todo o resto abaixo fica FORA.
+# ---------------------------------------------------------------------------
+
+# === NAO PUBLICAR: material de terceiros ===================================
+# refs/ tem capturas de tela REAIS de Guitar Hero / Rock Band / Clone Hero,
+# baixadas da Wikipedia so para comparacao visual interna durante o
+# desenvolvimento. Sao obras protegidas por direito autoral e NAO podem ser
+# republicadas. Este projeto e didatico e nao comercial, e nao redistribui
+# material de terceiros.
+refs/
+
+# === Capturas de desenvolvimento ==========================================
+# Milhares de PNGs de avaliacao visual (varias versoes). Nao servem ao jogo,
+# so pesam o repositorio.
+shots/
+!shots/.gitkeep
+
+# === PARTE DE DESENVOLVIMENTO — fica so na maquina local ==================
+# Nada disto e necessario para JOGAR. O jogo nao tem build: e index.html +
+# <script> classico. Quem quiser desenvolver pega o repo de desenvolvimento.
+
+# Ferramentas de captura headless, lint, testes de input e comparacao A/B.
+tools/
+
+# Documentacao interna: contrato entre agentes, estado do trabalho e o
+# briefing das imagens que ainda podem ser geradas.
+ARCHITECTURE.md
+ESTADO.md
+art_briefs/
+art_source/
+
+# === Lixo do navegador headless ===========================================
+# O Chromium/Edge headless usado por shot.sh e lint.sh despeja perfis
+# temporarios e logs de diagnostico na raiz. Nada disso e do jogo.
+_nt_probe.html.tmp/
+*.html.tmp/
+cv_debug.log
+chrome_debug.log
+
+# === Pasta de assets em arquivo (nao existe por contrato) =================
+# O jogo e 100% procedural: nao ha imagem nem audio em arquivo. A pasta so
+# fica aqui como lembrete; nada dentro dela deve ser versionado.
+assets/
+
+# === Lixo de sistema e editor =============================================
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+*.bak
+*~
+.vscode/
+.idea/
