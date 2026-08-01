@@ -50,11 +50,15 @@ _nt_probe.html.tmp/
 cv_debug.log
 chrome_debug.log
 
-# === Assets gerados localmente ============================================
-# Os WAVs de stems sao derivados reproduziveis da musica procedural e podem
-# ocupar centenas de MB. tools/generate-stems.ps1 os recria; quando faltam, o
-# jogo usa automaticamente o sintetizador ao vivo. Nao versionar os binarios.
-assets/
+# === Assets de audio gerados ==============================================
+# MP3 e a saida final, pequena o bastante para distribuicao. WAV e apenas o
+# intermediario sem perdas do gerador (mais de 400 MB) e fica local.
+assets/*
+!assets/audio/
+assets/audio/*
+!assets/audio/*/
+assets/audio/*/*
+!assets/audio/*/*.mp3
 
 # === Lixo de sistema e editor =============================================
 node_modules/

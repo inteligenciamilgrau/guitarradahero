@@ -4,8 +4,9 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass `
 #     -File .\tools\generate-stems.ps1 -SongId frevo-de-aco -Stem all
 #
-# Os WAVs sao artefatos locais ignorados pelo Git. O manifesto so recebe uma
-# entrada quando backing.wav, drums.wav e guitar.wav existem por completo.
+# O navegador renderiza WAVs intermediarios sem perdas; FFmpeg comprime cada
+# um para MP3 256 kb/s. Os WAVs ficam locais/ignorados e os MP3s podem ir ao
+# Git. O manifesto so recebe uma entrada depois dos tres MP3s completos.
 param(
   [string]$SongId = 'frevo-de-aco',
   [ValidateSet('all', 'backing', 'drums', 'guitar')]
@@ -20,6 +21,18 @@ if (-not $outDir.StartsWith($assetsRoot, [System.StringComparison]::OrdinalIgnor
   throw "Destino de audio fora do projeto: $outDir"
 }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+$ffmpegCandidates = @()
+$ffmpegCommand = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+if ($ffmpegCommand) { $ffmpegCandidates += $ffmpegCommand.Source }
+# Nesta arvore de desenvolvimento, apps/ vive tres niveis acima do projeto.
+# O caminho e resolvido relativamente: nenhum nome de usuario vai para o Git.
+$ffmpegCandidates += [System.IO.Path]::GetFullPath(
+  (Join-Path $projectRoot '..\..\..\apps\ffmpeg\ffmpeg.exe'))
+$ffmpeg = $ffmpegCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $ffmpeg) {
+  throw 'FFmpeg nao encontrado no PATH nem em ../../../apps/ffmpeg/ffmpeg.exe.'
+}
 
 $edgeCandidates = @()
 $edgeCommand = Get-Command msedge.exe -ErrorAction SilentlyContinue
@@ -80,7 +93,23 @@ foreach ($name in $list) {
     if (-not (Test-Path -LiteralPath $target)) { throw "O navegador nao gravou $target nem o download temporario $downloadName" }
     $size = (Get-Item -LiteralPath $target).Length
     if ($size -lt 100000) { throw "WAV incompleto ($size bytes): $target" }
-    Write-Host ("OK: {0:N1} MB" -f ($size / 1MB))
+
+    # Escreve num nome temporario para nunca substituir um MP3 valido por uma
+    # conversao interrompida. LAME/Xing grava encoder delay + padding; o
+    # decodeAudioData do Chromium foi aferido com deslocamento de 0 amostras.
+    $mp3Target = Join-Path $outDir "$name.mp3"
+    $mp3Temp = Join-Path $outDir "$name.generated.mp3"
+    if (Test-Path -LiteralPath $mp3Temp) { Remove-Item -LiteralPath $mp3Temp -Force }
+    & $ffmpeg -hide_banner -loglevel error -y -i $target -map_metadata -1 `
+      -c:a libmp3lame -b:a 256k -ar 48000 -ac 2 -write_xing 1 `
+      -id3v2_version 3 $mp3Temp
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $mp3Temp)) {
+      throw "FFmpeg falhou convertendo $target"
+    }
+    $mp3Size = (Get-Item -LiteralPath $mp3Temp).Length
+    if ($mp3Size -lt 100000) { throw "MP3 incompleto ($mp3Size bytes): $mp3Temp" }
+    Move-Item -LiteralPath $mp3Temp -Destination $mp3Target -Force
+    Write-Host ("OK: WAV {0:N1} MB -> MP3 {1:N1} MB" -f ($size / 1MB), ($mp3Size / 1MB))
   }
   finally {
     $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
@@ -92,18 +121,18 @@ foreach ($name in $list) {
   }
 }
 
-# So publica a entrada quando as tres faixas estao completas.
-$required = @('backing', 'drums', 'guitar') | ForEach-Object { Join-Path $outDir "$_.wav" }
+# So publica a entrada quando as tres faixas finais estao completas.
+$required = @('backing', 'drums', 'guitar') | ForEach-Object { Join-Path $outDir "$_.mp3" }
 if (($required | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -eq 0) {
   $songDirs = Get-ChildItem -LiteralPath $assetsRoot -Directory | Where-Object {
-    (Test-Path -LiteralPath (Join-Path $_.FullName 'backing.wav')) -and
-    (Test-Path -LiteralPath (Join-Path $_.FullName 'drums.wav')) -and
-    (Test-Path -LiteralPath (Join-Path $_.FullName 'guitar.wav'))
+    (Test-Path -LiteralPath (Join-Path $_.FullName 'backing.mp3')) -and
+    (Test-Path -LiteralPath (Join-Path $_.FullName 'drums.mp3')) -and
+    (Test-Path -LiteralPath (Join-Path $_.FullName 'guitar.mp3'))
   } | Sort-Object Name
 
   $rows = foreach ($dir in $songDirs) {
     $id = $dir.Name.Replace("'", "\'")
-    "      '$id': { backing: 'assets/audio/$id/backing.wav', drums: 'assets/audio/$id/drums.wav', guitar: 'assets/audio/$id/guitar.wav' }"
+    "      '$id': { backing: 'assets/audio/$id/backing.mp3', drums: 'assets/audio/$id/drums.mp3', guitar: 'assets/audio/$id/guitar.mp3' }"
   }
   $body = $rows -join ",`r`n"
   $manifest = @"

@@ -78,16 +78,17 @@ tools/generate-*    gerador offline de stems para músicas atuais e futuras
 vendor/             Three.js r147 + EffectComposer / Bloom / SMAA
 ```
 
-Os WAVs ficam em `assets/audio/<song-id>/` e são derivados reproduzíveis que
-somam centenas de megabytes, por isso não entram no Git. Para gerar ou regerar
-uma música no Windows, com Edge ou Chrome instalado:
+Os MP3s finais ficam em `assets/audio/<song-id>/` e fazem parte da distribuição.
+O gerador cria primeiro WAVs sem perdas, comprime com FFmpeg/LAME em 256 kb/s e
+mantém esses WAVs intermediários fora do Git. Para gerar ou regerar uma música
+no Windows, com Edge ou Chrome e FFmpeg instalados:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\generate-stems.ps1 -SongId frevo-de-aco -Stem all
 ```
 
-O script atualiza o manifesto somente depois que `backing.wav`, `drums.wav` e
-`guitar.wav` foram concluídos e validados. Se os arquivos não estiverem
+O script atualiza o manifesto somente depois que `backing.mp3`, `drums.mp3` e
+`guitar.mp3` foram concluídos e validados. Se os arquivos não estiverem
 presentes, o jogo continua funcionando pelo sintetizador procedural de fallback.
 As demais ferramentas de desenvolvimento e a documentação interna continuam
 fora do repositório.

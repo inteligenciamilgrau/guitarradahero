@@ -7,12 +7,12 @@
     version: 1,
     sampleRate: 48000,
     songs: {
-      'brega-da-madrugada': { backing: 'assets/audio/brega-da-madrugada/backing.wav', drums: 'assets/audio/brega-da-madrugada/drums.wav', guitar: 'assets/audio/brega-da-madrugada/guitar.wav' },
-      'carimbo-lua-cheia': { backing: 'assets/audio/carimbo-lua-cheia/backing.wav', drums: 'assets/audio/carimbo-lua-cheia/drums.wav', guitar: 'assets/audio/carimbo-lua-cheia/guitar.wav' },
-      'frevo-de-aco': { backing: 'assets/audio/frevo-de-aco/backing.wav', drums: 'assets/audio/frevo-de-aco/drums.wav', guitar: 'assets/audio/frevo-de-aco/guitar.wav' },
-      'guitarrada-ver-o-peso': { backing: 'assets/audio/guitarrada-ver-o-peso/backing.wav', drums: 'assets/audio/guitarrada-ver-o-peso/drums.wav', guitar: 'assets/audio/guitarrada-ver-o-peso/guitar.wav' },
-      'lambada-da-mare': { backing: 'assets/audio/lambada-da-mare/backing.wav', drums: 'assets/audio/lambada-da-mare/drums.wav', guitar: 'assets/audio/lambada-da-mare/guitar.wav' },
-      'samba-rock-eletrico': { backing: 'assets/audio/samba-rock-eletrico/backing.wav', drums: 'assets/audio/samba-rock-eletrico/drums.wav', guitar: 'assets/audio/samba-rock-eletrico/guitar.wav' }
+      'brega-da-madrugada': { backing: 'assets/audio/brega-da-madrugada/backing.mp3', drums: 'assets/audio/brega-da-madrugada/drums.mp3', guitar: 'assets/audio/brega-da-madrugada/guitar.mp3' },
+      'carimbo-lua-cheia': { backing: 'assets/audio/carimbo-lua-cheia/backing.mp3', drums: 'assets/audio/carimbo-lua-cheia/drums.mp3', guitar: 'assets/audio/carimbo-lua-cheia/guitar.mp3' },
+      'frevo-de-aco': { backing: 'assets/audio/frevo-de-aco/backing.mp3', drums: 'assets/audio/frevo-de-aco/drums.mp3', guitar: 'assets/audio/frevo-de-aco/guitar.mp3' },
+      'guitarrada-ver-o-peso': { backing: 'assets/audio/guitarrada-ver-o-peso/backing.mp3', drums: 'assets/audio/guitarrada-ver-o-peso/drums.mp3', guitar: 'assets/audio/guitarrada-ver-o-peso/guitar.mp3' },
+      'lambada-da-mare': { backing: 'assets/audio/lambada-da-mare/backing.mp3', drums: 'assets/audio/lambada-da-mare/drums.mp3', guitar: 'assets/audio/lambada-da-mare/guitar.mp3' },
+      'samba-rock-eletrico': { backing: 'assets/audio/samba-rock-eletrico/backing.mp3', drums: 'assets/audio/samba-rock-eletrico/drums.mp3', guitar: 'assets/audio/samba-rock-eletrico/guitar.mp3' }
     }
   };
 
