@@ -469,9 +469,73 @@
   var _bpm = 120;              /* bpm corrente, usado nos tempos de efeito */
   var _live = [];              /* vozes vivas para coleta */
   var _sweepTimer = 0;
-  var _voiceCount = 0;         /* limitador de polifonia */
+  /* Periodo da varredura de reserva. 220 ms, E TEM DE CONTINUAR 220 ms —
+     este numero nao e arbitrario, esta acoplado as margens de `retire`.
+     Medido em shots/_dspab2.html, mesmo codigo dos dois lados, so mudando o
+     periodo: varrer a cada 90 ms em vez de 220 ms sai 5,8% mais barato (o
+     grafo carrega menos no morto) e muda o som em -30,9 dB — muito acima do
+     criterio de inaudivel (-60 dB). Motivo: varrer mais cedo desconecta a
+     voz mais cedo, e as margens de `retire(N, end + m)` foram calibradas
+     contando com a folga desta varredura; sem ela, caudas sao cortadas.
+     Quem mexer num dos dois tem de recalibrar o outro e refazer a prova de
+     identidade sonora. Nao troque "de graca".
+
+     Vale lembrar que este temporizador e so a REDE: `schedule()` chama
+     sweep() no inicio de toda janela de lookahead, entao com o jogo rodando
+     a coleta acontece no ritmo do agendador (dezenas de ms). Este intervalo
+     cobre o caso de o agendador parar (pausa, menu, aba escondida). */
+  var SWEEP_MS = 220;
+  var _liveNodes = 0;          /* nos de audio ainda conectados (diagnostico) */
   var MAX_VOICES = 72;
+
+  /* TETO DURO DE VOZES (roubo de voz).
+     Escolhido por medicao, nao por chute: a bancada shots/_schedload.html,
+     no trecho mais denso da musica mais densa (frevo-de-aco, 78 eventos/s),
+     mediu pico de 74 vozes simultaneas. 120 esta muito acima disso — ou
+     seja, em jogo normal este teto NUNCA dispara e o arranjo continua
+     exatamente o mesmo. Ele existe para o caso patologico: aba em segundo
+     plano, varredura estrangulada por segundos, grafo crescendo sem parar.
+     Quando dispara, a voz mais antiga sai com FADE de 8 ms — corte seco e
+     que produz o clique. */
+  var HARD_VOICES = 120;
+  var STEAL_FADE = 0.008;
+
+  /* Antecipacao com que uma voz passa a ocupar orcamento de polifonia.
+     O contador antigo (_voiceCount++) subia no instante em que a voz era
+     MONTADA, que com lookahead de 0,20 s era ~0,2 s antes de soar. Ao subir
+     o lookahead para 0,75 s esse contador passaria a incluir 3/4 de segundo
+     de futuro e o orcamento estouraria sozinho — a musica ficaria mais
+     rala so por causa da janela. Contando por TEMPO (a voz ocupa orcamento
+     de start-0,20 s ate o fim) o resultado fica identico ao de antes e,
+     principalmente, deixa de depender da janela e da varredura. */
+  var BUDGET_LEAD = 0.20;
+
+  /* ORCAMENTO DE NOS SOANDO — a regua de GH.Synth.dspDiag().
+     Calibrado na bancada de custo real (OfflineAudioContext, tools/dsprun.sh
+     sobre o trecho mais denso de `frevo-de-aco`): o custo de DSP desta trilha
+     acompanha o numero de nos SOANDO, e nao o numero de notas — as familias
+     medidas isoladamente somam o mix inteiro dentro do ruido de medicao, e o
+     grafo fixo (3 convolvers, compressores, LFOs, soft-clip 4x) responde por
+     so 14% do total. 900 nos soando e onde a razao de tempo real da trilha
+     inteira alcanca a faixa de risco na maquina de referencia. Nao e um
+     limite que o codigo imponha: e a regua com que o diagnostico fala. */
+  var NODE_BUDGET = 900;
+  var _curWhen = 0;            /* instante absoluto da voz sendo montada */
   var _pendingTempo = null;    /* andamento pedido antes do grafo existir */
+
+  /* CHAVES DE ABLACAO — existem para a bancada shots/_dspload.html poder
+     medir, com o DSP rodando de verdade num OfflineAudioContext, quanto
+     cada estagio custa. O jogo NUNCA mexe nelas: todas nascem ligadas e
+     so GH.Synth.bench() (documentado como ferramenta de medicao) altera.
+     Sem elas so daria para otimizar no escuro. */
+  var _abl = { ks: true };
+  /* Protecao adaptativa da thread de audio. Uma vez que o dispositivo realmente
+     para com a pagina visivel, nao faz sentido reconstruir o mesmo grafo caro e
+     entrar no ciclo "toca -> underrun -> silencio -> toca". O modo permanece
+     ate o reload: remove primeiro apenas camadas caras/decorativas; guitarra,
+     baixo, bumbo e caixa continuam prioritarios. */
+  var _dspGuard = false;
+  var _dspGuardReason = '';
 
   /* Trim geral da trilha, calibrado por medicao offline (render de 10 s de
      cada genero num OfflineAudioContext). Sem ele a soma das familias
@@ -486,25 +550,170 @@
    * termina; um varredor leve (nao musical — pode ser setInterval) faz o
    * disconnect. Sem isto o grafo cresce e o audio comeca a estalar.
    * ------------------------------------------------------------------- */
-  function retire(list, endTime) {
-    _live.push({ e: endTime, n: list });
-    _voiceCount++;
+  function retire(list, endTime, params) {
+    /* `b` = instante em que a voz passa a ocupar orcamento. Amarrado ao
+       tempo em que ela SOA, nao ao tempo em que foi montada: e isso que
+       torna a polifonia imune ao tamanho da janela de lookahead. */
+    var rec = { b: _curWhen - BUDGET_LEAD, s: _curWhen, e: endTime, n: list,
+                p: params || null };
+    _live.push(rec);
+    _liveNodes += list.length;
+    var vc = activeVoicesAt(_curWhen - BUDGET_LEAD);
+    if (vc > _diag.peakVoices) { _diag.peakVoices = vc; }
+    if (_liveNodes > _diag.peakLive) { _diag.peakLive = _liveNodes; }
+    /* Teto duro contado em vozes SOANDO agora — nunca no tamanho da lista,
+       que inclui tudo o que a janela de lookahead ja deixou pronto. */
+    if (ctx && activeVoicesAt(ctx.currentTime) > HARD_VOICES) { stealOldest(); }
     if (!_sweepTimer && typeof setInterval === 'function') {
-      _sweepTimer = setInterval(sweep, 220);
+      _sweepTimer = setInterval(sweep, SWEEP_MS);
     }
+    return rec;
+  }
+
+  /* ---------------------------------------------------------------------
+   * RESULTADO NEGATIVO, ANOTADO PARA NINGUEM REPETIR:
+   * "APOSENTAR CEDO A EXCITACAO DE ATAQUE" NAO FUNCIONA.
+   *
+   * A ideia parecia dinheiro no chao. Quase toda voz daqui tem uma excitacao
+   * curtissima — estalo de palheta da guitarra (8 ms), burst de ruido e ping
+   * do Karplus-Strong (~20 ms), clique de tecla do orgao (7 ms), ar do bocal
+   * dos metais (85 ms), click do batedor do bumbo (15 ms) — que termina num
+   * GainNode cuja automacao chega a ZERO ABSOLUTO e nunca mais sobe. Depois
+   * disso a sub-cadeia inteira soma exatamente 0.0, mas continua ligada e
+   * sendo processada ate a voz morrer: numa nota de guitarra de meio segundo
+   * sao 8 nos de 32 trabalhando para produzir silencio em 96% do tempo.
+   * Desconectar zero nao pode mudar zero — certo?
+   *
+   * ERRADO, e a bancada pegou: shots/_dspab2.html, mesmo trecho, mesmo plano,
+   * com a varredura rodando, deu -30,9 dB de diferenca (o criterio de
+   * inaudivel e -60 dB). Com a ablacao `early0` no mesmo processo, a mesma
+   * medicao volta para -91,7 dB, ou seja, identica ao bit. A causa e do
+   * proprio WebAudio, nao do envelope:
+   *
+   *   `disconnect()` muda o NUMERO DE CANAIS do ponto de soma. Os buffers de
+   *   ruido deste sintetizador sao ESTEREO; os osciladores sao mono. Com o
+   *   modo `max` (o padrao), o no de soma e estereo enquanto a excitacao
+   *   estiver ligada e vira MONO no instante em que ela sai. E uma troca de
+   *   contagem de canais REINICIA o estado interno dos nos a jusante — no
+   *   Karplus-Strong ela zera a linha de atraso, isto e, apaga a corda que
+   *   estava soando. O ganho de 2,6% saia justamente de fazer menos coisa.
+   *
+   * Fica registrado: neste grafo, a unica desconexao segura e a da VOZ
+   * INTEIRA de uma vez (que e o que `retire`/`sweep` sempre fizeram), porque
+   * ai nenhum ponto de soma INTERNO a voz muda de forma.
+   * ------------------------------------------------------------------- */
+
+  /* Quantas vozes estao ocupando orcamento no instante t. */
+  function activeVoicesAt(t) {
+    var n = 0;
+    for (var i = 0; i < _live.length; i++) {
+      var L = _live[i];
+      if (L.b <= t && L.e > t) { n++; }
+    }
+    return n;
+  }
+
+  /* Nos pertencentes a vozes que estao SOANDO agora. E este o numero que
+     corresponde ao custo real de DSP: os nos de uma voz ainda nao iniciada
+     so propagam silencio, e o motor de audio pula a cadeia inteira. */
+  function activeNodesNow() {
+    if (!ctx) { return 0; }
+    var now = ctx.currentTime, n = 0;
+    for (var i = 0; i < _live.length; i++) {
+      var L = _live[i];
+      if (L.s <= now && L.e > now) { n += L.n.length; }
+    }
+    return n;
+  }
+
+  /* Conserva o valor REAL de uma automacao antes de substituir sua cauda.
+     `cancelScheduledValues()` sozinho pode restaurar o valor anterior da
+     timeline e criar exatamente o degrau que a rampa seguinte pretendia
+     evitar. `cancelAndHoldAtTime()` existe para esta operacao. O fallback le
+     ANTES de cancelar — nunca depois, quando o valor ja pode ter saltado. */
+  function holdParamAt(param, when) {
+    if (!param) { return; }
+    if (typeof param.cancelAndHoldAtTime === 'function') {
+      param.cancelAndHoldAtTime(when);
+      return;
+    }
+    var v = param.value;
+    param.cancelScheduledValues(when);
+    param.setValueAtTime(v, when);
+  }
+
+  /* Fecha uma voz com rampa curta. Nunca corte seco: descontinuidade em
+     amostra E o clique. Mesma receita do stopAll(), so que mais rapida. */
+  function fadeVoice(rec, now, dur) {
+    var arr = rec.n;
+    for (var m = 0; m < arr.length; m++) {
+      var nd = arr[m];
+      try {
+        if (nd.gain && typeof nd.gain.linearRampToValueAtTime === 'function') {
+          holdParamAt(nd.gain, now);
+          nd.gain.linearRampToValueAtTime(0, now + dur);
+        }
+      } catch (e) {}
+      try { if (typeof nd.stop === 'function') { nd.stop(now + dur + 0.01); } } catch (e2) {}
+    }
+    rec.e = now + dur + 0.02;
+  }
+
+  /* Roubo de voz: sai a MAIS ANTIGA que ja esta soando. Preferimos matar
+     uma cauda velha a recusar o ataque novo, que e o que o ouvido segue. */
+  function stealOldest() {
+    if (!ctx) { return; }
+    var now = ctx.currentTime;
+    var best = -1, bestS = Infinity;
+    for (var i = 0; i < _live.length; i++) {
+      var L = _live[i];
+      if (L.e <= now + STEAL_FADE) { continue; }   /* ja esta morrendo */
+      if (L.s < bestS) { bestS = L.s; best = i; }
+    }
+    if (best < 0) { return; }
+    fadeVoice(_live[best], now, STEAL_FADE);
+    _diag.stolen++;
   }
 
   function sweep() {
     if (!ctx) { return; }
     var now = ctx.currentTime;
-    for (var i = _live.length - 1; i >= 0; i--) {
+    var i, j, arr;
+    for (i = _live.length - 1; i >= 0; i--) {
       if (_live[i].e <= now) {
-        var arr = _live[i].n;
-        for (var j = 0; j < arr.length; j++) {
+        arr = _live[i].n;
+        for (j = 0; j < arr.length; j++) {
           try { arr[j].disconnect(); } catch (e) { /* ja desconectado */ }
         }
+        /* ------------------------------------------------------------------
+         * VAZAMENTO DE LIGACAO COMPARTILHADA — a explicacao que faltava para
+         * os "1372 nos no grafo contra 568 soando" anotados na rodada 1.
+         *
+         * `nodes.spCtl` e UM ConstantSourceNode compartilhado que abre a
+         * camada de oitava/quinta de TODAS as vozes de guitarra. Cada nota
+         * faz `spCtl.connect(spGate.gain)`. So que `spGate.disconnect()`
+         * desfaz apenas as ligacoes de SAIDA de `spGate` — a ligacao que
+         * ENTRA no AudioParam dele continua registrada na saida de `spCtl`.
+         * Resultado: a cada nota de guitarra o leque de saida de `spCtl`
+         * cresce em um e nunca encolhe, e cada `spGate` morto fica pendurado
+         * nele, fora do alcance do coletor, ate a musica acabar.
+         *
+         * A assinatura no numero e caracteristica: custo que cresce com a
+         * DURACAO, nao com a densidade. Medido em shots/_dspab2.html, mesmo
+         * trecho denso e com a varredura no ritmo do jogo, 2,5 s de audio
+         * davam razao de tempo real 0,76 e 12 s davam 6,29 — oito vezes mais
+         * caro por segundo so por estar mais adiante na musica.
+         *
+         * Conserto: desfazer pelo lado certo, `disconnect(param)` na FONTE.
+         * Nao muda uma amostra — quando isto roda, a voz ja saiu da saida. */
+        if (_live[i].p && nodes.spCtl) {
+          for (j = 0; j < _live[i].p.length; j++) {
+            try { nodes.spCtl.disconnect(_live[i].p[j]); } catch (e2) {}
+          }
+        }
+        _liveNodes -= arr.length;
+        if (_liveNodes < 0) { _liveNodes = 0; }
         _live.splice(i, 1);
-        _voiceCount = Math.max(0, _voiceCount - 1);
       }
     }
     if (!_live.length && _sweepTimer) {
@@ -1106,13 +1315,40 @@
     percOut.connect(busOut('drums'));
     percAir.connect(percRev); percRev.connect(roomSend);
 
+    /* ============ CONTROLE DAS CAMADAS DE STAR POWER ============
+     * As camadas de oitava e quinta da guitarra eram decididas NA HORA de
+     * montar cada nota (`if (_sp)`). Com lookahead de 0,20 s isso ja era
+     * quase instantaneo; com 0,75 s o Star Power demoraria ate 3/4 de
+     * segundo (quase dois tempos a 152 bpm) para "acender". A correcao e a
+     * que o manual manda: em vez de recriar o que ja foi agendado, as
+     * camadas SEMPRE existem e o que liga/desliga e um AudioParam.
+     *
+     * Uma unica fonte constante (0 ou 1) alimenta o ganho da camada de
+     * cada voz. Rampa em spCtl = todas as vozes, vivas e ja agendadas,
+     * acendem juntas no mesmo instante. Com SP desligado o ganho e zero
+     * absoluto, entao a saida e bit a bit a mesma de antes.
+     *
+     * ConstantSourceNode e padrao, mas se faltar (navegador antigo) caimos
+     * no comportamento antigo, decidido por nota. */
+    var spCtl = null;
+    if (typeof ctx.createConstantSource === 'function') {
+      try {
+        spCtl = ctx.createConstantSource();
+        spCtl.offset.value = 0;
+        spCtl.start();
+      } catch (eSp) { spCtl = null; }
+    }
+
     nodes = {
+      /* controle */
+      spCtl: spCtl,
       /* guitarra */
       gtrIn: gtrIn, gtrWah: gtrWah, gtrPre: gtrPre, gtrAmp: gtrAmp,
       gtrPres: gtrPres, gtrAir: gtrAir, gtrCab: gtrCab, gtrBright: gtrBright,
       gtrMute: gtrMute, gtrOut: gtrOut, gtrChorus: gtrChorus, gtrTrem: gtrTrem,
       wahLFO: wahLFO, wahAmt: wahAmt, slap: slap, slapSend: slapSend, slapRet: slapRet,
-      springSend: springSend, springRet: springRet,
+      springSend: springSend, springRet: springRet, springConv: springConv,
+      roomConv: roomConv,
       /* demais familias */
       bassIn: bassIn, bassLP: bassLP, bassOut: bassOut,
       keysIn: keysIn, keysOut: keysOut, keysLes: keysLes, keysTrem: keysTrem,
@@ -1162,8 +1398,7 @@
     if (!_ready || !ctx) { return; }
     var t = ctx.currentTime;
     var g = nodes.gtrMute.gain;
-    g.cancelScheduledValues(t);
-    g.setValueAtTime(g.value, t);
+    holdParamAt(g, t);
     if (instant) { g.setValueAtTime(on ? 0.0 : 1.0, t); return; }
     /* Corte rapido (12 ms) e volta um pouco mais lenta (35 ms): cortar
        rapido soa proposital, voltar rapido soa a clique. */
@@ -1179,42 +1414,44 @@
     var ramp = instant ? 0.001 : 0.22;
 
     var wah = nodes.gtrWah.frequency;
-    wah.cancelScheduledValues(t);
-    wah.setValueAtTime(wah.value, t);
+    holdParamAt(wah, t);
     wah.linearRampToValueAtTime(on ? 3350 : 2100, t + ramp);
 
     var wahDepth = nodes.wahAmt.gain;
-    wahDepth.cancelScheduledValues(t);
-    wahDepth.setValueAtTime(wahDepth.value, t);
+    holdParamAt(wahDepth, t);
     wahDepth.linearRampToValueAtTime(on ? 980 : 620, t + ramp);
 
     var br = nodes.gtrBright.gain;
-    br.cancelScheduledValues(t);
-    br.setValueAtTime(br.value, t);
+    holdParamAt(br, t);
     br.linearRampToValueAtTime(on ? 5.5 : 0.0, t + ramp);
 
     var sp = nodes.springRet.gain;
     var spBase = 0.55;
-    sp.cancelScheduledValues(t);
-    sp.setValueAtTime(sp.value, t);
+    holdParamAt(sp, t);
     sp.linearRampToValueAtTime(on ? spBase * 1.75 : spBase, t + ramp);
 
     var ch = nodes.gtrChorus.wet.gain;
-    ch.cancelScheduledValues(t);
-    ch.setValueAtTime(ch.value, t);
+    holdParamAt(ch, t);
     ch.linearRampToValueAtTime(on ? 0.52 : 0.34, t + ramp);
 
     var cab = nodes.gtrCab.frequency;
-    cab.cancelScheduledValues(t);
-    cab.setValueAtTime(cab.value, t);
+    holdParamAt(cab, t);
     cab.linearRampToValueAtTime(on ? 9200 : 7400, t + ramp);
+
+    /* Camadas de oitava/quinta: um unico AudioParam abre TODAS as vozes,
+       inclusive as que ja estao agendadas la na frente. Rampa de 25 ms —
+       degrau em amostra seria clique. */
+    if (nodes.spCtl) {
+      var spo = nodes.spCtl.offset;
+      holdParamAt(spo, t);
+      spo.linearRampToValueAtTime(on ? 1 : 0, t + (instant ? 0.001 : 0.025));
+    }
 
     /* Amp mais quente: mais compressao natural e sustain. */
     nodes.gtrAmp.curve = on ? curves.tubeHot : curves.tubeAmp;
 
     var pre = nodes.gtrPre.gain;
-    pre.cancelScheduledValues(t);
-    pre.setValueAtTime(pre.value, t);
+    holdParamAt(pre, t);
     pre.linearRampToValueAtTime(on ? 1.32 : 1.1, t + ramp);
   }
 
@@ -1263,8 +1500,11 @@
   /* Orcamento de polifonia: em trechos densos preferimos perder um chocalho
      a perder a guitarra. Prioridade 3 = guitarra/baixo/bumbo/caixa. */
   function budgetOK(prio) {
-    if (_voiceCount < MAX_VOICES) { return true; }
-    return prio >= 3;
+    var softLimit = _dspGuard ? 58 : MAX_VOICES;
+    if (activeVoicesAt(_curWhen - BUDGET_LEAD) < softLimit) { return true; }
+    if (prio >= 3) { return true; }
+    _diag.dropVoice++;
+    return false;
   }
 
   /* Contador deterministico para variar offsets de ruido sem Math.random. */
@@ -1373,6 +1613,13 @@
     out.gain.setTargetAtTime(0.0001, tStop, Math.max(0.02, tail * 0.4));
 
     var end = tStop + tail + 0.12;
+
+    /* A excitacao (src/bp/burst e ping/pingG) fica em zero absoluto poucos
+       milissegundos depois de t0, mas so sai do grafo quando a voz inteira
+       sai. Desconecta-la antes parecia lucro certo e NAO E — ver o resultado
+       negativo anotado logo acima de `activeVoicesAt`: tirar `burst`
+       (estereo) do laco derruba a linha de atraso para mono e apaga a corda
+       que estava soando. */
     return {
       out: out,
       end: end,
@@ -1403,7 +1650,14 @@
     var palm = !!art.palm;
     var N = [];
 
-    var mix = gain(1);
+    /* PONTO DE SOMA DA VOZ.
+       Era um `gain(1)` puro seguido de um `gain(0.85 + vel*0.25)` na entrada
+       da saturacao. Um GainNode de ganho 1.0 existindo so para somar e
+       desperdicio: a soma acontece na entrada de QUALQUER no. Fundindo os
+       dois, a conta e a mesma — (a+b+c) entrando num ganho k, em vez de
+       (a+b+c) passando por 1.0 e depois por k — e some um no por nota de
+       guitarra. */
+    var mix = gain(0.85 + vel * 0.25);
 
     /* --- osciladores --------------------------------------------------- */
     /* O leve desafino entre serra e quadrada cria batimento: e o que faz a
@@ -1421,18 +1675,49 @@
     o3.connect(g3); g3.connect(mix);
     N.push(o1, o2, o3, g1, g2, g3);
 
-    /* --- camadas de Star Power ----------------------------------------- */
-    /* Oitava acima + quinta acima da oitava: o acorde de potencia que faz o
-       solo "acender" quando o Star Power entra. */
+    /* --- camadas de Star Power ------------------------------------------
+     * Oitava acima + quinta acima da oitava: o acorde de potencia que faz o
+     * solo "acender" quando o Star Power entra. Elas nascem somente nas
+     * notas novas enquanto o efeito esta ligado; filtro, brilho e ambiencia
+     * do barramento continuam respondendo no instante do aperto.
+     *
+     * ESTE BLOCO TEM DE FICAR AQUI, antes do estalo de palheta e do
+     * Karplus-Strong, e a razao nao e estilo: e a ORDEM em que as fontes
+     * entram no ponto de soma. Soma de ponto flutuante nao e associativa, e
+     * o que sai daqui ainda atravessa lacos realimentados de ganho alto (a
+     * corda, o slapback, o eco ping-pong) e nao-linearidades (dois
+     * waveshapers e dois compressores). Um erro de 1 ulp na primeira
+     * amostra nao continua valendo 1 ulp: medido nesta rodada, so mudar
+     * este bloco de lugar deixou a saida identica em 2,5 s (-92 dB) e ja
+     * -27,6 dB em 10 s — divergencia numerica que cresce com o tempo, sem
+     * uma linha de timbre alterada. Quem mexer na ordem das ligacoes aqui
+     * tem de refazer a prova de identidade sonora em janela LONGA
+     * (shots/_dspab2.html com win=10).
+     *
+     * Fora do Star Power esta camada NAO nasce. A versao anterior testava
+     * `spCtl || _sp`; como `spCtl` existe sempre nos navegadores atuais, a
+     * condicao era sempre verdadeira e toda nota carregava dois osciladores
+     * e tres ganhos mudos. Alem do custo inutil, cada voz abria uma ligacao
+     * compartilhada que precisava ser coletada depois. Os efeitos de bus do
+     * Star Power continuam instantaneos; a camada harmonica entra nas notas
+     * novas, que e onde uma oitava/quinta musicalmente deve comecar. */
+    var spCtl = nodes.spCtl;
     var spOscs = [];
-    if (_sp) {
+    /* AudioParams alimentados pelo `spCtl` COMPARTILHADO. Guardados para a
+       varredura poder desfazer a ligacao pelo lado da fonte — ver sweep(). */
+    var spParams = null;
+    if (_sp && !_dspGuard) {
       var so1 = ctx.createOscillator(); so1.type = 'sawtooth'; so1.frequency.value = freq * 2;
       var so2 = ctx.createOscillator(); so2.type = 'square';   so2.frequency.value = freq * 3;
       var sg1 = gain(0.26), sg2 = gain(0.13);
-      so1.connect(sg1); sg1.connect(mix);
-      so2.connect(sg2); sg2.connect(mix);
+      var spGate = gain(spCtl ? 0 : 1);
+      if (spCtl) { spCtl.connect(spGate.gain); spParams = [spGate.gain]; }
+      so1.connect(sg1); sg1.connect(spGate);
+      so2.connect(sg2); sg2.connect(spGate);
+      spGate.connect(mix);
       spOscs.push(so1, so2);
-      N.push(so1, so2, sg1, sg2);
+      N.push(so1, so2, sg1, sg2, spGate);
+      _diag.spArmed++;
     }
 
     /* --- estalo de palheta --------------------------------------------- */
@@ -1455,7 +1740,8 @@
     /* Misturada baixa, so para dar corpo e aquele "rabo" metalico entre o
        ataque e o sustain. Em palm mute nao entra: a mao esta abafando. */
     var ks = null;
-    if (!palm && _voiceCount < MAX_VOICES - 12) {
+    if (!palm && _abl.ks && !_dspGuard &&
+        activeVoicesAt(_curWhen - BUDGET_LEAD) < MAX_VOICES - 12) {
       ks = karplusString(t0, freq, Math.min(hold, 0.9), {
         t60: legato ? 0.55 : 0.85,
         damp: clamp(freq * 7.5 + 1200, 1200, 9000),
@@ -1468,36 +1754,30 @@
     }
 
     /* --- articulacoes de altura ---------------------------------------- */
-    var oscAll = [o1, o2, o3].concat(spOscs);
-    var mult = [1, 1, 0.5, 2, 3];
-    var base = [d1, d2, d3, d1 - 3, d2 + 3];
-    var i, o, sp;
+    /* Virou FUNCAO (era um laco sobre uma lista fixa de osciladores) porque
+       as camadas de Star Power passaram a nascer sob demanda: quando elas
+       aparecem no meio da nota, precisam receber exatamente o mesmo slide,
+       o mesmo hammer-on, o mesmo bend, o mesmo micro-scoop e o mesmo
+       vibrato que os osciladores principais receberam. Uma funcao garante
+       que existe UMA definicao dessas articulacoes, nao duas. */
+    var vAmt = null;
+    var slideFrom = (art.slideFrom != null) ? midiToFreq(art.slideFrom) : 0;
+    var slideT = clamp(art.slideTime || 0.075, 0.02, 0.22);
+    var legFrom = (legato && art.legatoFrom != null && art.legatoFrom !== midi)
+                    ? midiToFreq(art.legatoFrom) : 0;
 
-    /* SLIDE: portamento a partir da nota anterior. E o glissando que define
-       o fraseado paraense — a nota chega deslizando, nao pousa seca. */
-    if (art.slideFrom != null) {
-      var fFrom = midiToFreq(art.slideFrom);
-      var slideT = clamp(art.slideTime || 0.075, 0.02, 0.22);
-      for (i = 0; i < oscAll.length; i++) {
-        o = oscAll[i];
-        o.frequency.setValueAtTime(fFrom * mult[i], t0);
-        o.frequency.exponentialRampToValueAtTime(freq * mult[i], t0 + slideT);
+    function articulate(o, mult, sp) {
+      /* SLIDE: portamento a partir da nota anterior. E o glissando que
+         define o fraseado paraense — a nota chega deslizando, nao pousa
+         seca. HAMMER-ON / PULL-OFF: o mesmo, so que em 26 ms. */
+      if (slideFrom) {
+        o.frequency.setValueAtTime(slideFrom * mult, t0);
+        o.frequency.exponentialRampToValueAtTime(freq * mult, t0 + slideT);
+      } else if (legFrom) {
+        o.frequency.setValueAtTime(legFrom * mult, t0);
+        o.frequency.exponentialRampToValueAtTime(freq * mult, t0 + 0.026);
       }
-    } else if (legato && art.legatoFrom != null && art.legatoFrom !== midi) {
-      /* HAMMER-ON / PULL-OFF: um portamento curtissimo (25 ms) liga as
-         notas sem re-atacar. */
-      var fL = midiToFreq(art.legatoFrom);
-      for (i = 0; i < oscAll.length; i++) {
-        o = oscAll[i];
-        o.frequency.setValueAtTime(fL * mult[i], t0);
-        o.frequency.exponentialRampToValueAtTime(freq * mult[i], t0 + 0.026);
-      }
-    }
-
-    /* BEND: sobe a afinacao dentro da nota (detune em cents). */
-    for (i = 0; i < oscAll.length; i++) {
-      o = oscAll[i];
-      sp = base[i];
+      /* BEND: sobe a afinacao dentro da nota (detune em cents). */
       if (art.bend) {
         var bAmt = art.bend;                       /* em cents, ex.: 200 = 1 tom */
         var bDelay = clamp(art.bendDelay == null ? 0.06 : art.bendDelay, 0, 0.4);
@@ -1516,17 +1796,20 @@
       } else {
         o.detune.setValueAtTime(sp, t0);
       }
+      if (vAmt) { vAmt.connect(o.detune); }
     }
 
     /* VIBRATO: LFO de altura que so ENTRA depois de um atraso. Vibrato
-       imediato soa a sintetizador; vibrato que cresce soa a dedo. */
+       imediato soa a sintetizador; vibrato que cresce soa a dedo.
+       Montado ANTES das articulacoes so para que `articulate` ja possa
+       ligar o LFO em cada oscilador — automacao de AudioParam e absoluta,
+       entao a ordem de montagem nao muda uma amostra sequer do resultado. */
     if (art.vib !== false && hold > 0.20) {
       var vLfo = ctx.createOscillator();
       vLfo.type = 'sine';
       vLfo.frequency.value = art.vibRate || (5.1 + (midi % 5) * 0.14);
-      var vAmt = gain(0);
+      vAmt = gain(0);
       vLfo.connect(vAmt);
-      for (i = 0; i < oscAll.length; i++) { vAmt.connect(oscAll[i].detune); }
       var vDelay = clamp(art.vibDelay == null ? 0.16 : art.vibDelay, 0, 1.2);
       var vDepth = art.vibDepth || (palm ? 6 : 26);   /* cents */
       vAmt.gain.setValueAtTime(0, t0);
@@ -1536,11 +1819,18 @@
       N.push(vLfo, vAmt);
     }
 
+    articulate(o1, 1, d1);
+    articulate(o2, 1, d2);
+    articulate(o3, 0.5, d3);
+    if (spOscs.length) {
+      articulate(spOscs[0], 2, d1 - 3);
+      articulate(spOscs[1], 3, d2 + 3);
+    }
+
     /* --- saturacao leve na propria corda -------------------------------- */
     var sat = shaper(curves.tubeSoft, '2x');
-    var satIn = gain(0.85 + vel * 0.25);
-    mix.connect(satIn); satIn.connect(sat);
-    N.push(mix, satIn, sat);
+    mix.connect(sat);
+    N.push(mix, sat);
 
     /* --- filtro com envelope: o "quack" da palhetada -------------------- */
     /* O corte salta para cima no ataque e desaba em ~150 ms. Com Q alto,
@@ -1585,10 +1875,10 @@
     try {
       o1.start(t0); o2.start(t0); o3.start(t0);
       o1.stop(end); o2.stop(end); o3.stop(end);
-      for (i = 0; i < spOscs.length; i++) { spOscs[i].start(t0); spOscs[i].stop(end); }
+      for (var q = 0; q < spOscs.length; q++) { spOscs[q].start(t0); spOscs[q].stop(end); }
     } catch (e) { /* contexto fechado */ }
 
-    retire(N, Math.max(end, ks ? ks.end : 0) + 0.05);
+    retire(N, Math.max(end, ks ? ks.end : 0) + 0.05, spParams);
   }
 
   /* ---------------------------------------------------------------------
@@ -1715,7 +2005,10 @@
     var t0 = when;
     var N = [];
 
-    var mix = gain(1);
+    /* O ponto de soma E o passa-baixa que ja vinha logo depois: um
+       `gain(1)` so para somar nao faz nada que a entrada do proprio filtro
+       nao faca. Um no a menos por nota de teclado. */
+    var mix = filt('lowpass', clamp(freq * 8 + 1800, 1800, 9000), 0.6);
     var o = ctx.createOscillator();
     o.setPeriodicWave(waves.organ);
     o.frequency.value = freq * 0.5;      /* ver comentario do buildWaves */
@@ -1748,15 +2041,13 @@
     try { ns.start(t0, noiseOffset() * 2.0); ns.stop(t0 + 0.02); } catch (e) {}
     N.push(ns, nhp, ng);
 
-    var lp = filt('lowpass', clamp(freq * 8 + 1800, 1800, 9000), 0.6);
-    mix.connect(lp);
     var amp = gain(0);
-    lp.connect(amp);
+    mix.connect(amp);
     /* Orgao nao tem decaimento: e liga-desliga. Ataque e release de 8-30 ms
        so para evitar clique. */
     var end = adsr(amp.gain, t0, 0.36 * vel, 0.010, 0.05, 0.92, t0 + hold, 0.075);
     amp.connect(targetFor('organ'));
-    N.push(mix, lp, amp);
+    N.push(mix, amp);
 
     try { o.start(t0); o.stop(end); pOsc.start(t0); pOsc.stop(t0 + 0.25); } catch (e) {}
     retire(N, end + 0.05);
@@ -1777,7 +2068,11 @@
     var t0 = when;
     var N = [];
 
-    var mix = gain(1);
+    /* O ponto de soma E o filtro de sopro que ja vinha depois dele — o
+       `gain(1)` intermediario nao fazia nada que a entrada do filtro nao
+       faca. Um no a menos por nota de metal. */
+    var vf = filt('lowpass', 900, 1.9);
+    var mix = vf;
     var o1 = ctx.createOscillator(); o1.setPeriodicWave(waves.brass); o1.frequency.value = freq;
     var o2 = ctx.createOscillator(); o2.setPeriodicWave(waves.brass); o2.frequency.value = freq;
     o1.detune.value = -9; o2.detune.value = 10;
@@ -1800,13 +2095,11 @@
 
     /* Envelope de sopro no filtro: sobe em 45 ms (mais lento que corda) e
        assenta. E o "ataque de bocal". */
-    var vf = filt('lowpass', 900, 1.9);
     var cb = clamp(freq * 3.2 + 700, 700, 4200);
     vf.frequency.setValueAtTime(cb * 0.42, t0);
     vf.frequency.linearRampToValueAtTime(cb * (1.5 + vel), t0 + 0.045);
     vf.frequency.exponentialRampToValueAtTime(cb, t0 + 0.22);
-    mix.connect(vf);
-    N.push(mix, vf);
+    N.push(vf);
 
     /* Queda de afinacao no fim (o "fall" do frevo). */
     if (art.fall) {
@@ -1848,7 +2141,10 @@
     var t0 = when;
     var N = [];
 
-    var mix = gain(1);
+    /* O ponto de soma ja E o ganho de saida da voz: um `gain(1)` so para
+       somar e um no por nota sem funcao (a soma acontece na entrada de
+       qualquer no). Era mix(1) -> amp(1.7*vel); agora e so amp. */
+    var mix = gain(1.7 * vel);
     var ks = karplusString(t0, freq, hold, {
       t60: art.mute ? 0.16 : (0.9 + (80 - clamp(ev.m, 40, 90)) * 0.02),
       damp: clamp(freq * 11 + 900, 1100, 10000),
@@ -1873,13 +2169,12 @@
     N.push(o, og);
 
     /* Nivel calibrado por medicao offline: uma corda dedilhada sozinha
-       chega a ~-15 dBFS, que e onde ela divide bem com a guitarra solista. */
-    var amp = gain(1.7 * vel);
-    mix.connect(amp);
+       chega a ~-15 dBFS, que e onde ela divide bem com a guitarra solista.
+       (O ganho vive no proprio `mix` — ver o comentario la em cima.) */
     var pn = panner(art.pan || 0);
-    amp.connect(pn);
+    mix.connect(pn);
     pn.connect(targetFor('pluck'));
-    N.push(mix, amp, pn);
+    N.push(mix, pn);
 
     try { o.start(t0); o.stop(t0 + 0.25); } catch (e) {}
     retire(N, ks.end + 0.06);
@@ -4049,6 +4344,72 @@
   var _anchorCtx = 0;      /* ctx.currentTime no instante da ancora */
   var _anchorSong = 0;     /* tempo de musica correspondente */
 
+  var LATE_GRACE = 0.020;  /* atraso tolerado antes de desistir da nota */
+  var NUDGE = 0.005;       /* folga minima a frente de ctx.currentTime */
+
+  /* ---------------------------------------------------------------------
+   * DIAGNOSTICO DO AGENDADOR (GH.Synth.diag)
+   *
+   * O jogador relatou "trepidada de ruido quando tem muitos objetos". Isso
+   * nao se debate com opiniao: mede-se. Estes contadores existem para
+   * responder, com numero, a pergunta que importa — quantas notas foram
+   * pedidas com um instante que JA PASSOU? Um evento agendado no passado e
+   * disparado pelo WebAudio imediatamente, fora do compasso, e todos os que
+   * caem juntos somam no mesmo instante: e exatamente o estalo que se ouve.
+   *
+   *   windows  janelas de lookahead processadas
+   *   events   eventos disparados
+   *   past     eventos cujo instante ja tinha passado quando foram vistos
+   *   dropped  eventos descartados (passado demais para valer a pena)
+   *   nudged   eventos empurrados para agora+epsilon (tocaram fora do tempo)
+   *   lateMaxMs / lateMeanMs   o quanto o instante ja tinha passado
+   *   burstMax quantas notas caíram no MESMO instante (avalanche)
+   *   stolen   vozes roubadas pelo teto de polifonia
+   *   dropVoice vozes recusadas por falta de orcamento
+   *   peakVoices pico de vozes simultaneas
+   * ------------------------------------------------------------------- */
+  var _diag = {
+    windows: 0, events: 0, past: 0, dropped: 0, nudged: 0,
+    lateMaxMs: 0, lateSumMs: 0, burstMax: 0,
+    stolen: 0, dropVoice: 0, peakVoices: 0, peakLive: 0,
+    /* Quantas vozes de guitarra tiveram a camada de oitava/quinta armada.
+       Fora do Star Power tem de ser ZERO — e a prova de que os dois
+       osciladores da camada nao estao mais rodando calados em toda nota. */
+    spArmed: 0,
+    /* Quantas vezes um cursor de janela recuou a ponto de exigir a
+       reabilitacao de um trecho do plano. Tem de ser ZERO: e a assinatura
+       numerica da nota agendada duas vezes (ver a BARREIRA DE IDENTIDADE
+       em schedule()). */
+    rearm: 0,
+    stopAll: 0,
+    stopReasons: {},
+    guardActivations: 0
+  };
+  var _burstT = -1e9, _burstN = 0;
+
+  function diagReset() {
+    _diag.windows = 0; _diag.events = 0; _diag.past = 0; _diag.dropped = 0;
+    _diag.nudged = 0; _diag.lateMaxMs = 0; _diag.lateSumMs = 0; _diag.burstMax = 0;
+    _diag.stolen = 0; _diag.dropVoice = 0; _diag.peakVoices = 0; _diag.peakLive = 0;
+    _diag.spArmed = 0; _diag.rearm = 0; _diag.stopAll = 0; _diag.stopReasons = {};
+    _diag.guardActivations = 0;
+    _burstT = -1e9; _burstN = 0;
+  }
+
+  /* Conta quantos eventos caem no mesmo instante — a avalanche que satura a
+     soma e produz o "estalo" mesmo quando cada voz esta correta. */
+  function diagBurst(when) {
+    /* `when >= _burstT` importa: numa troca de musica (ou num seek para tras)
+       o instante agendado DESPENCA — o trecho novo comeca em ctx.currentTime
+       enquanto o antigo ja estava agendado 3/4 de segundo a frente. Sem esta
+       guarda o contador lia a janela inteira do trecho novo como uma unica
+       avalanche (medido: 46 "notas no mesmo instante" que na verdade estavam
+       espalhadas por 0,75 s). Um salto para tras nao e avalanche: e recomeco. */
+    if (when >= _burstT && when - _burstT < 0.004) { _burstN++; }
+    else { _burstT = when; _burstN = 1; }
+    if (_burstN > _diag.burstMax) { _diag.burstMax = _burstN; }
+  }
+
   function ensureCtx() {
     if (ctx && _ready) { return true; }
     var a = _audio || GH.Audio || null;
@@ -4125,14 +4486,10 @@
     return lo;
   }
 
-  function resetFrom(plan, t) {
-    var i = lowerBound(plan.events, t - 0.0005);
-    for (; i < plan.done.length; i++) { plan.done[i] = 0; }
-  }
-
   function fire(e, when) {
     var v = VOICES[e.i];
     if (!v) { return; }
+    _curWhen = when;      /* o orcamento de polifonia e avaliado NESTE instante */
     /* Uma voz que explode nunca pode derrubar a musica inteira. */
     try { v(e, when); } catch (err) { /* segue o baile */ }
   }
@@ -4167,11 +4524,47 @@
     if (!(fromSec >= 0)) { fromSec = 0; }
     if (!(toSec > fromSec)) { toSec = fromSec + 0.1; }
 
-    /* Busca para tras (rebobinou, reiniciou, saiu da pausa): reabilita os
-       eventos daquele ponto em diante. Assim schedule e idempotente na
-       janela mas ainda responde a saltos do relogio. */
-    if (fromSec < plan.cursorFrom - 0.25) { resetFrom(plan, fromSec); }
+    /* ------------------------------------------------------------------
+     * BARREIRA DE IDENTIDADE
+     *
+     * `plan.done` e um bit por evento do arranjo: 1 significa "este evento
+     * ja foi entregue ao hardware". E ele que torna schedule() idempotente e
+     * que faz as TRES fontes de tick do maestro (setInterval, quadro e
+     * Worker) baterem na mesma janela sem consequencia — medido na bancada
+     * shots/_dupcheck.html: 0 duplicatas em quadro estavel, quadro
+     * irregular, engasgos de 150-400 ms, aba escondida e Star Power.
+     *
+     * O unico jeito de o mesmo evento ser agendado duas vezes e alguem
+     * APAGAR esse bit enquanto a voz correspondente ainda esta na fila do
+     * hardware. Era o que este ramo fazia: um cursor que recuava mais de
+     * 250 ms reabilitava o trecho inteiro SEM cancelar o que ja tinha sido
+     * entregue. Resultado medido antes da correcao, com seis engasgos de
+     * 120 ms do dispositivo de audio: 289 eventos agendados duas vezes, 198
+     * audiveis, as copias separadas por ~100 ms — bumbo, caixa, ganza e
+     * guitarra em dobro, defasados. E o "chiado"/"trepidada" relatado.
+     *
+     * Agora a regra e explicita e sem excecao: reabilitar so acontece junto
+     * com o CANCELAMENTO da fila. stopAll() faz as duas coisas de uma vez —
+     * fecha as vozes com rampa de 50 ms e zera `done` de todos os planos.
+     * Nunca uma sem a outra.
+     *
+     * Com o maestro corrigido (o cursor nao recua mais), este ramo nao
+     * deveria disparar nunca. `_diag.rearm` existe para que, se alguem
+     * reintroduzir um recuo de cursor, isso apareca como NUMERO em
+     * GH.Synth.diag() em vez de aparecer como ruido no fone do jogador.
+     * ------------------------------------------------------------------ */
+    if (fromSec < plan.cursorFrom - 0.25) {
+      _diag.rearm++;
+      stopAll('defensive-rearm');
+    }
     plan.cursorFrom = fromSec;
+
+    /* Recolhe o que ja morreu ANTES de montar a janela nova. A varredura
+       tinha um setInterval proprio de 220 ms na thread principal — a mesma
+       thread faminta. Sob carga ela nao rodava, os nos ficavam conectados,
+       o grafo crescia e o orcamento de polifonia se enchia de fantasmas.
+       Amarrada aqui, a limpeza acontece no mesmo ritmo do agendamento. */
+    sweep();
 
     syncAnchor(fromSec);
     var now = ctx.currentTime;
@@ -4179,20 +4572,60 @@
     var done = plan.done;
     var i = lowerBound(ev, fromSec);
 
+    _diag.windows++;
     for (; i < ev.length; i++) {
       var e = ev[i];
       if (e.t >= toSec) { break; }
       if (done[i]) { continue; }
       done[i] = 1;
       var when = ctxTimeForSong(e.t);
-      /* Se a aba travou e o evento ja passou, descarta em vez de disparar
-         uma avalanche de notas atrasadas de uma vez. */
-      if (when < now - 0.05) { continue; }
-      fire(e, when < now + 0.004 ? now + 0.004 : when);
+
+      /* --------------------------------------------------------------
+       * NUNCA AGENDAR NO PASSADO — politica explicita.
+       *
+       * Um instante que ja passou nao e honrado pelo WebAudio: a nota
+       * dispara IMEDIATAMENTE. Se um engasgo atrasou dez notas, as dez
+       * caem no mesmo instante — fora do compasso, somando em fase, com
+       * clique no ataque. E exatamente o "estalo" relatado.
+       *
+       * A escolha, documentada:
+       *   - atraso <= LATE_GRACE (20 ms): a nota ainda esta dentro da
+       *     tolerancia perceptiva (a janela "perfeita" do jogo e 25 ms).
+       *     Toca, empurrada para agora + NUDGE. O ataque nao e cortado
+       *     porque o envelope inteiro comeca em NUDGE, no futuro — nao ha
+       *     degrau de amostra.
+       *   - atraso > LATE_GRACE: DESCARTA. Uma nota 50 ms fora do tempo,
+       *     empilhada com as outras atrasadas, faz mais estrago que o
+       *     silencio dela. Perder uma semicolcheia nao se ouve; um estalo
+       *     no meio do compasso se ouve.
+       * Com o lookahead de 0,75 s este ramo praticamente nao acontece:
+       * seria preciso um quadro de mais de 3/4 de segundo. Ele existe
+       * como rede, e conta quantas vezes acontece (GH.Synth.diag()).
+       * ------------------------------------------------------------ */
+      if (when < now) {
+        _diag.past++;
+        var lateMs = (now - when) * 1000;
+        _diag.lateSumMs += lateMs;
+        if (lateMs > _diag.lateMaxMs) { _diag.lateMaxMs = lateMs; }
+        if (now - when > LATE_GRACE) { _diag.dropped++; continue; }
+        _diag.nudged++;
+        when = now + NUDGE;
+      } else if (when < now + NUDGE) {
+        /* Dentro do bloco de render corrente: empurra o suficiente para o
+           ataque nascer inteiro no proximo bloco. */
+        when = now + NUDGE;
+      }
+
+      _diag.events++;
+      diagBurst(when);
+      fire(e, when);
     }
   }
 
-  function stopAll() {
+  function stopAll(reason) {
+    var why = (typeof reason === 'string' && reason) ? reason : 'unspecified';
+    _diag.stopAll++;
+    _diag.stopReasons[why] = (_diag.stopReasons[why] || 0) + 1;
     var k;
     for (k in _plans) {
       if (Object.prototype.hasOwnProperty.call(_plans, k)) {
@@ -4212,8 +4645,7 @@
         /* Fecha em 50 ms em vez de cortar: corte seco estala. */
         try {
           if (nd.gain && typeof nd.gain.linearRampToValueAtTime === 'function') {
-            nd.gain.cancelScheduledValues(now);
-            nd.gain.setValueAtTime(nd.gain.value, now);
+            holdParamAt(nd.gain, now);
             nd.gain.linearRampToValueAtTime(0, now + 0.05);
           }
         } catch (e) {}
@@ -4233,6 +4665,7 @@
        no-op silencioso e o jogo segue normalmente. */
     init: function (audio) {
       _audio = audio || GH.Audio || null;
+      try { if (GH.Stems) GH.Stems.init(_audio); } catch (e0) {}
       /* Devolver false aqui NAO e falha: pode ser modo captura (sem audio)
          ou GH.Audio.init() ainda nao ter rodado. No segundo caso o grafo
          nasce sozinho na primeira janela de schedule(). */
@@ -4241,10 +4674,16 @@
 
     /* Pre-computa o arranjo inteiro (harmonia, groove, guitarra do chart).
        Pode ser chamado sem audio — e so processamento de dados. */
-    prepare: function (song) { return prepare(song); },
+    prepare: function (song) {
+      try { if (GH.Stems) GH.Stems.prepare(song); } catch (e0) {}
+      return prepare(song);
+    },
 
     /* Agenda a janela [fromSec, toSec) em tempo de musica. Idempotente. */
     schedule: function (song, fromSec, toSec) {
+      try {
+        if (GH.Stems && GH.Stems.schedule(song, fromSec, toSec)) return;
+      } catch (e0) { /* fallback procedural */ }
       try { schedule(song, fromSec, toSec); } catch (e) { /* nunca quebra o loop */ }
     },
 
@@ -4252,6 +4691,7 @@
        classico de Guitar Hero quando o jogador erra. */
     setGuitarMuted: function (on) {
       _muted = !!on;
+      try { if (GH.Stems) GH.Stems.setGuitarMuted(_muted); } catch (e0) {}
       applyMute(_muted, false);
     },
 
@@ -4261,11 +4701,24 @@
       var v = !!on;
       if (v === _sp) { return; }
       _sp = v;
+      try { if (GH.Stems) GH.Stems.setStarPower(_sp); } catch (e0) {}
       applyStarPower(_sp, false);
     },
 
-    stopAll: function () {
-      try { stopAll(); } catch (e) {}
+    /* Chamado pelo Conductor somente depois de uma parada REAL do relogio de
+       audio com a pagina visivel. Idempotente: varias recuperacoes nao ficam
+       alternando a qualidade e recriando o proprio ciclo. */
+    onAudioStall: function (reason) {
+      if (_dspGuard) { return false; }
+      _dspGuard = true;
+      _dspGuardReason = (typeof reason === 'string' && reason) ? reason : 'audio-stall';
+      _diag.guardActivations++;
+      return true;
+    },
+
+    stopAll: function (reason) {
+      try { if (GH.Stems) GH.Stems.stopAll(reason); } catch (e0) {}
+      try { stopAll(reason); } catch (e) {}
     },
 
     /* ---- extras uteis para os outros agentes (nao quebram o contrato) --- */
@@ -4281,7 +4734,8 @@
       var v = VOICES[inst];
       if (!v) { return; }
       var t = (typeof when === 'number' && isFinite(when)) ? when : (ctx.currentTime + 0.01);
-      if (t < ctx.currentTime) { t = ctx.currentTime + 0.005; }
+      if (t < ctx.currentTime + NUDGE) { t = ctx.currentTime + NUDGE; }
+      _curWhen = t;
       try {
         v({ m: midi == null ? 69 : midi, v: vel == null ? 0.8 : vel,
             d: dur == null ? 0.3 : dur, a: art || null }, t);
@@ -4305,7 +4759,104 @@
     get isMuted() { return _muted; },
     get starPowerActive() { return _sp; },
     get ready() { return _ready; },
-    get voices() { return _voiceCount; },
+    get voices() { return ctx ? activeVoicesAt(ctx.currentTime) : 0; },
+    get liveNodes() { return _liveNodes; },
+    get activeNodes() { return activeNodesNow(); },
+
+    /* Diagnostico do agendador. Copia rasa: ninguem de fora mexe no contador.
+       `past` e o numero que interessa — tem que ser ZERO mesmo sob carga. */
+    diag: function () {
+      var reasons = {}, rk, stemInfo = null;
+      for (rk in _diag.stopReasons) {
+        if (Object.prototype.hasOwnProperty.call(_diag.stopReasons, rk)) {
+          reasons[rk] = _diag.stopReasons[rk];
+        }
+      }
+      try { if (GH.Stems && GH.Stems.diag) stemInfo = GH.Stems.diag(); } catch (e0) {}
+      return {
+        windows: _diag.windows, events: _diag.events, past: _diag.past,
+        dropped: _diag.dropped, nudged: _diag.nudged,
+        lateMaxMs: Math.round(_diag.lateMaxMs * 10) / 10,
+        lateMeanMs: _diag.past ? Math.round(_diag.lateSumMs / _diag.past * 10) / 10 : 0,
+        burstMax: _diag.burstMax, stolen: _diag.stolen, dropVoice: _diag.dropVoice,
+        peakVoices: _diag.peakVoices, peakLive: _diag.peakLive,
+        spArmed: _diag.spArmed, rearm: _diag.rearm,
+        stopAll: _diag.stopAll, stopReasons: reasons,
+        dspGuard: _dspGuard, dspGuardReason: _dspGuardReason,
+        guardActivations: _diag.guardActivations,
+        voices: ctx ? activeVoicesAt(ctx.currentTime) : 0,
+        liveNodes: _liveNodes, activeNodes: activeNodesNow(), scheduled: _live.length,
+        stems: stemInfo
+      };
+    },
+    resetDiag: function () { diagReset(); },
+
+    /* ---- DIAGNOSTICO DE CARGA DE DSP (GH.Synth.dspDiag) -----------------
+     *
+     * `diag()` acima responde "o AGENDADOR esta dando conta?". Esta responde
+     * a outra pergunta, a que sobrou depois que a primeira foi resolvida:
+     * "a THREAD DE AUDIO esta dando conta?".
+     *
+     * Por que a segunda existe: a thread de audio do navegador e UMA SO e
+     * tem `quantum/sampleRate` (2,67 ms a 48 kHz) para processar cada bloco
+     * de 128 amostras. Estourar esse prazo produz UNDERRUN, que soa como a
+     * "trepidada de ruido" relatada — e acontece com a CPU total da maquina
+     * em 36%, porque o gargalo e um prazo de uma thread, nao a maquina.
+     *
+     * A carga foi medida de verdade (OfflineAudioContext, DSP executado) em
+     * shots/_dspload.html + tools/dsprun.sh. O que a medicao mostrou:
+     *   - o custo e proporcional ao NUMERO DE NOS SOANDO, nao ao numero de
+     *     notas: o grafo fixo inteiro (3 convolvers, compressores, LFOs,
+     *     soft-clip 4x) responde por so 14% do total;
+     *   - a guitarra custa ~4x mais por nota que qualquer outra familia,
+     *     porque e a voz com mais nos.
+     * Dai o modelo desta funcao: `load` = nos soando / NODE_BUDGET, com
+     * NODE_BUDGET calibrado na bancada como o ponto em que a razao de tempo
+     * real entra na faixa de risco.
+     *
+     * Tudo o que sai daqui e FATO OU ESTIMATIVA DECLARADA — nada de
+     * inventar numero: `baseLatencyMs`/`outputLatencyMs` vem do navegador,
+     * `activeNodes` da contagem real, e `load` e explicitamente um modelo.
+     * ------------------------------------------------------------------ */
+    dspDiag: function () {
+      var q = 128;
+      var sr = ctx ? (ctx.sampleRate || 48000) : 48000;
+      var an = activeNodesNow();
+      var load = an / NODE_BUDGET;
+      var lat = { base: -1, out: -1, hint: 'n/d' };
+      try {
+        if (ctx && typeof ctx.baseLatency === 'number' && isFinite(ctx.baseLatency)) {
+          lat.base = ctx.baseLatency;
+        }
+        if (ctx && typeof ctx.outputLatency === 'number' && isFinite(ctx.outputLatency)) {
+          lat.out = ctx.outputLatency;
+        }
+        if (_audio && _audio.stability) { lat.hint = _audio.stability; }
+      } catch (e) {}
+      /* Folga = quantos blocos de 128 amostras cabem no buffer de saida.
+         E ISTO que decide se um soluco vira estalo: com 1-2 blocos de
+         folga, qualquer atraso de 5 ms fura; com 16, nao. */
+      var slackBlocks = lat.base > 0 ? (lat.base * sr / q) : -1;
+      return {
+        sampleRate: sr, quantum: q,
+        blockDeadlineMs: Math.round(q / sr * 1e5) / 100,
+        voices: ctx ? activeVoicesAt(ctx.currentTime) : 0,
+        activeNodes: an, liveNodes: _liveNodes,
+        peakVoices: _diag.peakVoices, peakLive: _diag.peakLive,
+        nodeBudget: NODE_BUDGET,
+        load: Math.round(load * 1000) / 1000,
+        spArmed: _diag.spArmed,
+        stolen: _diag.stolen, dropVoice: _diag.dropVoice,
+        dspGuard: _dspGuard, dspGuardReason: _dspGuardReason,
+        latencyHint: lat.hint,
+        baseLatencyMs: lat.base >= 0 ? Math.round(lat.base * 1e5) / 100 : -1,
+        outputLatencyMs: lat.out >= 0 ? Math.round(lat.out * 1e5) / 100 : -1,
+        slackBlocks: slackBlocks >= 0 ? Math.round(slackBlocks * 10) / 10 : -1,
+        verdict: load < 0.35 ? 'folgado'
+               : (load < 0.7 ? 'aceitavel'
+               : (load < 1.0 ? 'arriscado' : 'RISCO DE UNDERRUN'))
+      };
+    },
 
     /* Ajuste fino de volume por familia, caso a mixagem precise ceder
        espaco para narracao/SFX em algum momento. */
@@ -4319,13 +4870,28 @@
       var n = map[name];
       if (!n) { return; }
       var t = ctx.currentTime;
-      n.gain.cancelScheduledValues(t);
-      n.gain.setValueAtTime(n.gain.value, t);
+      holdParamAt(n.gain, t);
       n.gain.linearRampToValueAtTime(clamp(v, 0, 2), t + 0.05);
     },
 
     /* Limpa o cache de arranjos (troca de setlist, recarga de conteudo). */
-    clearCache: function () { _plans = {}; }
+    clearCache: function () { _plans = {}; },
+
+    /* ---- BANCADA DE CUSTO DE DSP (shots/_dspload.html) ------------------
+       Nao e API de jogo. Existe porque medir custo de DSP exige poder
+       DESLIGAR um estagio de cada vez e re-renderizar; sem isso so se
+       otimiza no escuro. `nodes` da acesso aos nos fixos do grafo para a
+       bancada desconectar um retorno de efeito; `ablate` liga/desliga
+       camadas por voz. Ambos nascem no estado normal do jogo. */
+    bench: {
+      nodes: function () { return _ready ? nodes : null; },
+      sweep: function () { try { sweep(); } catch (e) {} },
+      ablate: function (o) {
+        if (!o) { return _abl; }
+        if (o.ks != null) { _abl.ks = !!o.ks; }
+        return _abl;
+      }
+    }
   };
 
 })(window.GH = window.GH || {});

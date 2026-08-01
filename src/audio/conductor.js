@@ -52,6 +52,7 @@
     showFPS: false,
     hitFlash: true,         // flash de tela no acerto (pode incomodar)
     crowdAmbience: true,    // leito de plateia continuo nos menus
+    crowd3D: true,          // publico instanciado e animado ao fundo do palco
     calibrated: false,      // o jogador ja passou pela calibracao?
 
     /* Chaves de JOGABILIDADE. Nasceram em src/core/input.js (que carrega antes
@@ -104,6 +105,7 @@
     if (typeof src.showFPS !== 'undefined') target.showFPS = !!src.showFPS;
     if (typeof src.hitFlash !== 'undefined') target.hitFlash = !!src.hitFlash;
     if (typeof src.crowdAmbience !== 'undefined') target.crowdAmbience = !!src.crowdAmbience;
+    if (typeof src.crowd3D !== 'undefined') target.crowd3D = !!src.crowd3D;
     if (typeof src.calibrated !== 'undefined') target.calibrated = !!src.calibrated;
     if (typeof src.noFail !== 'undefined') target.noFail = !!src.noFail;
     if (typeof src.invertStrum !== 'undefined') target.invertStrum = !!src.invertStrum;
@@ -164,6 +166,7 @@
       showFPS: GH.Settings.showFPS,
       hitFlash: GH.Settings.hitFlash,
       crowdAmbience: GH.Settings.crowdAmbience,
+      crowd3D: GH.Settings.crowd3D,
       calibrated: GH.Settings.calibrated,
       noFail: GH.Settings.noFail,
       invertStrum: GH.Settings.invertStrum
@@ -187,6 +190,7 @@
     } catch (e) {}
     try { if (GH.Chart) GH.Chart.speed = S.scrollSpeed; } catch (e2) {}
     try { if (GH.Engine && GH.Engine.setQuality) GH.Engine.setQuality(S.quality); } catch (e3) {}
+    try { if (GH.Stage && GH.Stage.setCrowdEnabled) GH.Stage.setCrowdEnabled(S.crowd3D); } catch (e4) {}
     return S;
   }
 
@@ -363,6 +367,17 @@
   var ctxQuiet = 0;           // segundos de parede sem o audio andar, ja morto
   var ctxDeadCount = 0;       // quantas vezes o audio morreu (diagnostico)
 
+  /* GRAVADOR DE VOO DO AUDIO.
+     Fica sempre armado, mas guarda so ~16 s e amostra a 4 Hz: custo pequeno e
+     memoria constante. O objetivo e conservar o ANTES do defeito — abrir o F3
+     depois do silencio nao pode apagar a causa. Eventos de transporte entram
+     imediatamente; amostras periodicas entram pelo mesmo pump do scheduler. */
+  var FLIGHT_MAX = 80;
+  var FLIGHT_PERIOD = 0.25;
+  var flight = [];
+  var flightLastWall = -1e9;
+  var flightSeq = 0;
+
   var lastEventTime = 0;      // ate onde os eventos ja foram despachados
   var lastSectionIdx = -1;
   var lastBeatIdx = -1;       // apenas informativo (ultimo beat despachado)
@@ -370,9 +385,70 @@
 
   var listeners = { beat: [], bar: [], section: [] };
 
-  var lookahead = 0.20;       // janela agendada a frente, em segundos
-  var TICK_MS = 25;           // periodicidade do scheduler
+  /* JANELA DE LOOKAHEAD — medida, nao chutada.
+   *
+   * Com 0,20 s a janela nao sobrevive a um quadro gordo: a bancada
+   * shots/_schedload.html, com engasgos de 150-400 ms na thread principal,
+   * mediu 286 eventos agendados com instante JA PASSADO, 289 notas
+   * empurradas para "agora" (fora do compasso, todas somando no mesmo
+   * instante) e 7,08 s de musica que a janela nunca chegou a pedir — 551
+   * eventos que simplesmente nao tocaram. E exatamente a "trepidada de
+   * ruido" que o jogador ouve quando a tela enche de particula.
+   *
+   * 0,75 s da quase o dobro de folga sobre o pior quadro observado
+   * (394 ms) e continua bem abaixo do tempo de reacao do jogo: mute e
+   * Star Power sao rampas de AudioParam no barramento, aplicadas em
+   * ctx.currentTime, e portanto NAO dependem desta janela.
+   *
+   * O tick de 100 ms e so a rede de seguranca. Na pratica quem pede musica
+   * e o proprio quadro (pumpScheduler('frame') dentro de update()), o que
+   * distribui o trabalho em fatias de ~16 ms em vez de rajadas.
+   */
+  var lookahead = 0.75;       // janela BASE agendada a frente, em segundos
+  var TICK_MS = 100;          // periodicidade do scheduler (rede de seguranca)
+  var PUMP_MIN_SEC = 0.008;   // nao adianta reagendar mais denso que isto
+  var LATE_GRACE = 0.02;      // tolerancia de atraso antes de desistir da nota
+
+  /* JANELA QUE APRENDE — medida na bancada shots/_cruelload.html.
+   *
+   * Uma janela FIXA, por maior que seja, tem um tamanho de engasgo que a
+   * derruba. O caso que derrubou a de 0,75 s nao foi carga de render: foi o
+   * jogador trocar de aba. Com `document.hidden`, o Chrome estrangula
+   * setInterval para no minimo 1000 ms e PARA o rAF — as duas fontes de tick
+   * somem de uma vez, e 1,0 s > 0,75 s. Medido antes desta correcao, em 30 s
+   * de aba escondida: 29 janelas perdidas, 6,67 s de musica que nunca tocou
+   * (541 eventos) e 53 notas vistas com instante ja passado.
+   *
+   * Duas defesas, uma preditiva e uma reativa:
+   *
+   *   1. PREDITIVA — `visibilitychange`. Quando a aba some, sabemos de
+   *      antemao que o timer vai ser estrangulado. O evento chega na thread
+   *      principal ANTES do estrangulamento comecar a valer, entao a janela
+   *      sobe para HIDDEN_LOOKAHEAD e a fila e reabastecida na hora. Nao se
+   *      perde nem a primeira janela.
+   *
+   *   2. REATIVA — `learnGap()`. Qualquer outra fome (congelamento de
+   *      600-900 ms, GC do navegador, disco travado) e aprendida do proprio
+   *      intervalo entre bombeadas: a proxima pausa pode ser tao ruim quanto
+   *      a ultima, entao a janela passa a valer 1,6x o pior intervalo
+   *      recente. A folga relaxa sozinha (BOOST_TAU) para o jogo nao ficar
+   *      com uma fila gigante depois de um susto isolado.
+   *
+   * Por que crescer a janela e seguro: cada nota carrega um instante
+   * ABSOLUTO de ctx, o orcamento de polifonia e contado por TEMPO (imune ao
+   * tamanho da janela), e tudo que salta no tempo — pause/resume/seek/start
+   * — cancela a fila com stopAll(). O mute da guitarra e o Star Power sao
+   * rampas de AudioParam no barramento, aplicadas em ctx.currentTime: nao
+   * dependem da janela e continuam imediatos (12 ms e 25 ms, medidos). */
+  var LOOKAHEAD_MAX = 2.5;       // teto absoluto da janela efetiva
+  var HIDDEN_LOOKAHEAD = 2.5;    // aba escondida: timer estrangulado a 1 s
+  var BOOST_TAU = 6.0;           // relaxamento da folga conquistada (segundos)
+  var lookaheadBoost = 0;        // folga extra conquistada na marra
+  var lastGapWall = -1;          // instante da ultima bombeada, para medir o vao
   var schedTimer = 0;
+  var schedWorker = null;     // fonte de tick imune a fome da thread principal
+  var schedWorkerURL = '';
+  var lastPumpWall = -1;
   var schedCursor = 0;        // ate onde ja pedimos musica ao GH.Synth (cru)
 
   var suppressAutoAdvance = false;   // avanco virtual explicito ja aconteceu
@@ -406,6 +482,66 @@
     var s = GH.Synth;
     if (!s || typeof s[method] !== 'function') return;
     try { s[method](a, b, c); } catch (e) { /* o synth nunca derruba o relogio */ }
+  }
+
+  function round3(v) {
+    return (typeof v === 'number' && isFinite(v)) ? Math.round(v * 1000) / 1000 : null;
+  }
+
+  function flightPush(entry) {
+    entry.seq = ++flightSeq;
+    entry.wall = round3(wallNow());
+    try {
+      entry.ctx = ctx ? round3(ctx.currentTime) : null;
+      entry.state = ctx ? String(ctx.state || 'unknown') : 'virtual';
+    } catch (e) { entry.ctx = null; entry.state = 'error'; }
+    entry.song = round3(smoothRaw);
+    entry.cursor = round3(schedCursor);
+    entry.stalled = !!ctxDead;
+    entry.stallCount = ctxDeadCount;
+    flight.push(entry);
+    if (flight.length > FLIGHT_MAX) flight.splice(0, flight.length - FLIGHT_MAX);
+  }
+
+  function flightEvent(kind, detail) {
+    var e = { type: String(kind || 'event') }, k;
+    if (detail) {
+      for (k in detail) {
+        if (Object.prototype.hasOwnProperty.call(detail, k)) e[k] = detail[k];
+      }
+    }
+    flightPush(e);
+  }
+
+  function flightSample(force) {
+    var w = wallNow();
+    if (!force && w - flightLastWall < FLIGHT_PERIOD) return;
+    flightLastWall = w;
+    var e = { type: 'sample' };
+    try {
+      if (ctx && typeof ctx.getOutputTimestamp === 'function') {
+        var ts = ctx.getOutputTimestamp();
+        if (ts) {
+          e.outCtx = round3(ts.contextTime);
+          e.outPerf = round3(ts.performanceTime);
+        }
+      }
+      if (ctx) {
+        e.baseLatency = round3(ctx.baseLatency);
+        e.outputLatency = round3(ctx.outputLatency);
+      }
+    } catch (eTs) { /* timestamp e opcional */ }
+    try {
+      var sd = GH.Synth && GH.Synth.diag ? GH.Synth.diag() : null;
+      if (sd) {
+        e.voices = sd.voices; e.activeNodes = sd.activeNodes; e.liveNodes = sd.liveNodes;
+        e.queued = sd.scheduled; e.past = sd.past; e.dropped = sd.dropped;
+        e.rearm = sd.rearm; e.stopAll = sd.stopAll;
+      }
+    } catch (eSyn) { /* diagnostico nao interfere no audio */ }
+    e.skips = _sd.skips;
+    e.skippedSec = round3(_sd.skippedSec);
+    flightPush(e);
   }
 
   /* --- MAPA DE ANDAMENTO ---------------------------------------------------
@@ -512,12 +648,37 @@
 
   /* Reancora o relogio de audio no tempo que o jogo ja esta mostrando.
      Depois disto `target` vale exatamente `smoothRaw`, entao a volta do audio
-     nao produz degrau nenhum na pista. */
+     nao produz degrau nenhum na pista.
+
+     REANCORAR E UM SALTO NO TEMPO — e por isso CANCELA A FILA.
+     Medido na bancada shots/_dupcheck.html (regime 8b, seis engasgos de
+     120 ms do dispositivo): sem este stopAll(), a volta do relogio de audio
+     agendava 289 eventos PELA SEGUNDA VEZ, 198 deles audiveis, com as duas
+     copias separadas por ~100 ms. Bumbo, caixa, ganza e guitarra tocando duas
+     vezes com um decimo de segundo de defasagem — exatamente a "trepidada de
+     ruido" relatada pelo jogador.
+     A cadeia era esta: o relogio de audio para -> o vigia declara o contexto
+     morto -> o cursor da janela e arrastado de volta para `smoothRaw`, ate
+     uma janela inteira ATRAS de onde a musica ja tinha sido entregue ao
+     hardware -> o relogio volta, reancoramos, e a proxima janela comeca no
+     passado -> GH.Synth ve o cursor recuar e REABILITA os eventos daquele
+     trecho -> as vozes ja enfileiradas continuam la, e as novas entram por
+     cima. Ninguem tinha agendado duas vezes por concorrencia entre as fontes
+     de tick: quem duplicava era a propria recuperacao do relogio.
+     A epoca (`audioEpoch`) muda aqui, entao TUDO que ja foi entregue com a
+     epoca antiga esta no instante errado. Cancelar e a unica leitura correta:
+     e a mesma disciplina que start(), pause(), resume() e seek() ja seguem —
+     todo salto no tempo cancela a fila. */
   function reanchorCtx() {
     if (!ctx) return;
+    flightEvent('reanchor', { oldEpoch: round3(startCtxTime - startOffset) });
+    safeSynth('stopAll', 'reanchor');
     startCtxTime = ctx.currentTime;
     startOffset = smoothRaw;
     schedCursor = smoothRaw;
+    /* O vao atravessado pelo engasgo do dispositivo nao diz nada sobre a
+       saude da thread principal: nao pode virar folga de lookahead. */
+    lastGapWall = -1;
   }
 
   /* Declara o relogio de audio morto.
@@ -544,7 +705,11 @@
     /* Contexto explicitamente suspenso/fechado: morto na hora, sem esperar. */
     var st = ctx.state;
     if (st === 'suspended' || st === 'closed' || st === 'interrupted') {
-      if (!ctxDead) { ctxDead = true; ctxDeadCount++; declareDead(); }
+      if (!ctxDead) {
+        ctxDead = true; ctxDeadCount++; declareDead();
+        flightEvent('audio-dead', { reason: 'state-' + st });
+        if (!hiddenTab()) safeSynth('onAudioStall', 'state-' + st);
+      }
       ctxAwake = 0;
       return true;
     }
@@ -555,6 +720,8 @@
         ctxStall += dtWall;
         if (ctxStall > CTX_STALL_SEC) {
           ctxDead = true; ctxDeadCount++; ctxAwake = 0; declareDead();
+          flightEvent('audio-dead', { reason: 'clock-not-moving' });
+          if (!hiddenTab()) safeSynth('onAudioStall', 'clock-not-moving');
         }
       }
     } else {
@@ -765,33 +932,201 @@
    * latencia existem para alinhar julgamento e imagem ao que se ouve, nao para
    * deslocar a propria musica.
    * ------------------------------------------------------------------------ */
+  /* Diagnostico do agendador (GH.Conductor.schedDiag).
+     `skippedSec` e a medida do dano: segundos de MUSICA que a janela de
+     lookahead nunca chegou a pedir porque o tick chegou tarde demais. Cada
+     segundo aqui e um punhado de notas que simplesmente nao tocaram. */
+  var _sd = { ticks: 0, maxGapMs: 0, lastTickWall: -1, skips: 0, skippedSec: 0, src: {} };
+
+  function schedDiagTick(src) {
+    var w = wallNow();
+    if (_sd.lastTickWall >= 0) {
+      var gap = (w - _sd.lastTickWall) * 1000;
+      if (gap > _sd.maxGapMs) _sd.maxGapMs = gap;
+    }
+    _sd.lastTickWall = w;
+    _sd.ticks++;
+    _sd.src[src] = (_sd.src[src] || 0) + 1;
+  }
+
+  /* A aba esta escondida? Consultado a cada bombeada (leitura de propriedade,
+     custo zero) para cobrir tambem o caso em que a pagina JA nasce escondida
+     e o evento visibilitychange nunca chega. */
+  function hiddenTab() {
+    try { return !!(window.document && window.document.hidden); } catch (e) { return false; }
+  }
+
+  /* Janela efetiva: base + folga aprendida, com piso de aba escondida e teto
+     duro. Nunca menor que a base configurada. */
+  function effLookahead() {
+    var la = lookahead + lookaheadBoost;
+    if (hiddenTab() && la < HIDDEN_LOOKAHEAD) la = HIDDEN_LOOKAHEAD;
+    return la > LOOKAHEAD_MAX ? LOOKAHEAD_MAX : la;
+  }
+
+  /* Aprende com o intervalo REAL entre duas bombeadas. Nao e estimativa de
+     fps: e o vao de verdade entre duas oportunidades de agendar, que e
+     exatamente o que a janela precisa cobrir. */
+  function learnGap(w) {
+    if (lastGapWall >= 0) {
+      var gap = w - lastGapWall;
+      if (gap > 0) {
+        if (lookaheadBoost > 0) {
+          lookaheadBoost *= Math.exp(-gap / BOOST_TAU);
+          if (lookaheadBoost < 0.005) lookaheadBoost = 0;
+        }
+        /* So aprende com vao que AMEACOU a janela de verdade.
+           Um quadro de 16 ms nao ensina nada e nao pode inflar a fila; e um
+           salto absurdo (maquina que dormiu e acordou, relogio de tempo
+           virtual do headless) tambem nao e fome de thread — quem cuida
+           desse caso e o vigia do relogio de audio, nao a janela. Sem estes
+           dois limites a janela cresceria em ambientes onde nada esta
+           errado, e o proprio agendador viraria fonte de engasgo: cada
+           janela e um lote de vozes montado de uma vez na thread principal. */
+        if (gap > effLookahead() * 0.6 && gap < 5) {
+          var need = gap * 1.6 + 0.15 - lookahead;
+          if (need > lookaheadBoost) {
+            lookaheadBoost = need > (LOOKAHEAD_MAX - lookahead) ? (LOOKAHEAD_MAX - lookahead) : need;
+          }
+        }
+      }
+    }
+    lastGapWall = w;
+  }
+
   function schedulerTick() {
     if (!playing || !ctx || !loaded) return;
     /* Relogio de audio parado: nao adianta agendar nada — o tempo absoluto do
        ctx nao esta andando e a fila so acumularia eventos que estourariam
        todos de uma vez quando o audio voltasse. Arrastamos o cursor junto com
        o tempo do jogo e esperamos o vigia reancorar. */
-    if (ctxDead) { schedCursor = rawAudioNow(); return; }
+    /* O CURSOR SO ANDA PARA FRENTE.
+       Aqui a intencao e nao deixar o cursor apodrecendo no passado enquanto o
+       audio esta morto; a versao anterior fazia isso com uma atribuicao seca,
+       que ARRASTAVA o cursor para tras (o cursor ja estava uma janela inteira
+       a frente de `rawAudioNow()`). Um cursor que recua e, para GH.Synth, um
+       pedido de reagendar musica ja entregue — ver o comentario em
+       reanchorCtx(). Mover so para frente mantem a particao das janelas
+       disjunta, que e o que torna as tres fontes de tick (setInterval, quadro
+       e Worker) inofensivas umas as outras. */
+    if (ctxDead) {
+      var rd = rawAudioNow();
+      if (rd > schedCursor) { schedCursor = rd; }
+      return;
+    }
     var raw = rawAudioNow();
-    var until = raw + lookahead;
+    var until = raw + effLookahead();
     var from = schedCursor;
     // Se a aba ficou em segundo plano, o intervalo e estrangulado e o cursor
     // fica no passado. Nao adianta agendar o que ja passou: pula pra frente.
-    if (from < raw - 0.05) from = raw - 0.05;
+    if (from < raw - LATE_GRACE) {
+      _sd.skips++;
+      _sd.skippedSec += (raw - LATE_GRACE) - from;
+      flightEvent('scheduler-skip', { seconds: round3((raw - LATE_GRACE) - from) });
+      from = raw - LATE_GRACE;
+    }
     if (until <= from) return;
     safeSynth('schedule', song, from, until);
     schedCursor = until;
   }
 
+  /* Uma unica porta de entrada para todas as fontes de tick. schedulerTick()
+     e idempotente (a janela so anda para frente), entao ter varias fontes e
+     seguro: o que uma perde, a outra cobre. O estrangulamento so existe para
+     nao repetir trabalho inutil dentro do mesmo milissegundo. */
+  function pumpScheduler(src, force) {
+    if (!playing || !ctx || !loaded) return;
+    var w = wallNow();
+    if (!force && lastPumpWall >= 0 && (w - lastPumpWall) < PUMP_MIN_SEC) return;
+    lastPumpWall = w;
+    learnGap(w);
+    schedDiagTick(src);
+    schedulerTick();
+    flightSample(false);
+  }
+
+  /* A ABA SUMIU. O navegador estrangula setInterval para >= 1 s e para o rAF
+     no mesmo instante — as duas fontes de tick de uma vez. Este evento chega
+     ANTES do estrangulamento valer, entao e a unica chance de reabastecer a
+     fila com a janela ja maior. Sem `force`, a garganta de 8 ms do pump
+     poderia justamente engolir esta bombeada, que e a que importa.
+     Voltando a ser visivel, o vao atravessado nao ensina nada (a musica
+     continuou tocando o tempo todo), so zeramos a medida. */
+  function onVisibilityChange() {
+    lastGapWall = -1;
+    try { pumpScheduler('visibility', true); } catch (e) {}
+  }
+
+  try {
+    if (window.document && window.document.addEventListener) {
+      window.document.addEventListener('visibilitychange', onVisibilityChange, false);
+    }
+  } catch (eVis) { /* sem document: nada a fazer, o timer continua valendo */ }
+
+  /* FONTE DE TICK EM WEB WORKER.
+   *
+   * O timer de um Worker nao e estrangulado pelo trabalho de render nem pelo
+   * "intensive throttling" que o Chrome aplica a aba em segundo plano. Sem
+   * arquivo externo: o codigo do worker nasce de um Blob local (nao e rede,
+   * nao viola a regra de "zero URL externa").
+   *
+   * MEDIDO, e a verdade e desconfortavel: em `file://` o Chrome recusa
+   * silenciosamente o worker de Blob — a bancada shots/_workerprobe.html
+   * mediu 0 ticks, sem excecao e sem onerror. Por isso o setInterval NUNCA
+   * e desligado: o worker e um reforco, nao um substituto. Onde ele
+   * funciona (GitHub Pages, http/https) o jogo ganha um relogio que a
+   * thread principal nao consegue matar; onde nao funciona, nada muda.
+   *
+   * E preciso ser honesto sobre o que o worker NAO resolve: se a thread
+   * principal ficar presa 300 ms, a mensagem dele tambem so e entregue
+   * quando ela voltar. Quem salva a musica nesse caso e o LOOKAHEAD. */
+  function startWorkerClock() {
+    if (schedWorker) return;
+    try {
+      if (typeof window.Worker !== 'function') return;
+      if (typeof window.Blob !== 'function') return;
+      if (!window.URL || typeof window.URL.createObjectURL !== 'function') return;
+      var src =
+        'var id=0;' +
+        'self.onmessage=function(e){var d=e.data||{};' +
+        'if(d.cmd===\'start\'){if(id)clearInterval(id);id=setInterval(function(){self.postMessage(1);},d.ms||100);}' +
+        'else if(d.cmd===\'stop\'){if(id)clearInterval(id);id=0;}};';
+      schedWorkerURL = window.URL.createObjectURL(new window.Blob([src], { type: 'application/javascript' }));
+      schedWorker = new window.Worker(schedWorkerURL);
+      schedWorker.onmessage = function () { pumpScheduler('worker'); };
+      schedWorker.onerror = function () { stopWorkerClock(); };
+      schedWorker.postMessage({ cmd: 'start', ms: TICK_MS });
+    } catch (e) {
+      /* Sem worker o jogo continua igual: o setInterval e o tick por quadro
+         ja cobrem tudo. Nunca e fatal. */
+      stopWorkerClock();
+    }
+  }
+
+  function stopWorkerClock() {
+    try { if (schedWorker) { schedWorker.onmessage = null; schedWorker.terminate(); } } catch (e) {}
+    schedWorker = null;
+    try { if (schedWorkerURL && window.URL && window.URL.revokeObjectURL) window.URL.revokeObjectURL(schedWorkerURL); } catch (e2) {}
+    schedWorkerURL = '';
+  }
+
   function startScheduler() {
     stopScheduler();
     if (!ctx) return;                 // sem audio nao ha nada para agendar
-    schedTimer = window.setInterval(schedulerTick, TICK_MS);
+    schedTimer = window.setInterval(function () { pumpScheduler('timer'); }, TICK_MS);
+    startWorkerClock();
+    lastPumpWall = -1;
+    /* O intervalo atravessado por uma pausa (ou pela troca de musica) nao
+       ensina nada sobre a saude da thread: nao pode virar folga. */
+    lastGapWall = -1;
+    schedDiagTick('start');
     schedulerTick();                  // primeira janela imediatamente
   }
 
   function stopScheduler() {
     if (schedTimer) { window.clearInterval(schedTimer); schedTimer = 0; }
+    stopWorkerClock();
+    lastPumpWall = -1;
   }
 
   /* --- CICLO DE VIDA ------------------------------------------------------- */
@@ -811,6 +1146,7 @@
     ctx = audioCtx || null;
     virtual = !ctx;
     resetWatchdog();
+    flightEvent('clock-source', { source: virtual ? 'virtual' : 'audio-context' });
   }
 
   // Em captura nunca adotamos AudioContext. Fora dela, se o Audio subiu depois
@@ -892,6 +1228,16 @@
     var off = (typeof offsetSec_ === 'number' && isFinite(offsetSec_)) ? offsetSec_ : 0;
     if (off < -30) off = -30;
 
+    /* Comecar do zero e um SALTO no tempo, exatamente como seek(). Se alguem
+       chamar start() sem parar antes (reiniciar depois de falhar, trocar de
+       musica pelo menu), existe ate uma janela inteira de musica velha ja
+       entregue ao hardware, que tocaria por cima da nova. stopAll() fecha
+       essas vozes com rampa e reabilita o plano. Quando start() vem depois
+       de stop(), como no fluxo normal do jogo, isto e um no-op. */
+    flightEvent('start', { offset: round3(off) });
+    safeSynth('stopAll', 'start');
+    lookaheadBoost = 0;          // musica nova, historia de fome zerada
+
     playing = true;
     if (ctx) {
       startCtxTime = ctx.currentTime;
@@ -915,7 +1261,8 @@
     playing = false;
     smoothRaw = pausedRaw;
     stopScheduler();
-    safeSynth('stopAll');
+    flightEvent('pause', { at: round3(pausedRaw) });
+    safeSynth('stopAll', 'pause');
     return GH.Conductor;
   }
 
@@ -935,13 +1282,15 @@
     schedCursor = pausedRaw;                 // nao reagenda o que ficou na pausa
     resetEventCursors(pausedRaw - offsetSec());
     startScheduler();
+    flightEvent('resume', { at: round3(pausedRaw) });
     return GH.Conductor;
   }
 
   function stop() {
     playing = false;
     stopScheduler();
-    safeSynth('stopAll');
+    flightEvent('stop', { at: round3(smoothRaw) });
+    safeSynth('stopAll', 'stop');
     pausedRaw = 0; virtualRaw = 0; smoothRaw = 0; schedCursor = 0;
     haveWall = false;
     resetWatchdog();
@@ -952,6 +1301,12 @@
   // Salta para uma posicao sem disparar as batidas do caminho.
   function seek(t) {
     var v = (typeof t === 'number' && isFinite(t)) ? t : 0;
+    /* Com lookahead de 0,75 s existe ate 3/4 de segundo de musica JA
+       agendada no hardware. Saltar sem cancelar deixaria essa fila tocar
+       por cima da posicao nova — som do trecho antigo em cima do novo.
+       stopAll() fecha as vozes com rampa e reabilita o plano. */
+    flightEvent('seek', { to: round3(v) });
+    safeSynth('stopAll', 'seek');
     if (ctx && playing) {
       startCtxTime = ctx.currentTime;
       startOffset = v;
@@ -991,6 +1346,14 @@
     }
     sampleClock();
     dispatchEvents();
+    /* O QUADRO TAMBEM E UMA FONTE DE TICK.
+       Depois de um quadro de 300 ms, esperar mais um periodo do setInterval
+       para reabastecer a janela e desperdicar o unico instante em que a
+       thread esta livre. Aqui a janela e reabastecida na primeira
+       oportunidade, sem timer nenhum, e em fatias de um quadro — o que
+       tambem espalha o custo de montar vozes em vez de concentra-lo em
+       rajadas de 100 ms. */
+    pumpScheduler('frame');
     return timeNow();
   }
 
@@ -1100,7 +1463,35 @@
     scheduleAhead: scheduleAhead,
     ctxTimeAt: ctxTimeAt,
     songTimeAtCtx: songTimeAtCtx,
-    tickIntervalMs: TICK_MS
+    tickIntervalMs: TICK_MS,
+
+    /* Diagnostico do agendador — numeros, nao opiniao. */
+    schedDiag: function () {
+      return {
+        ticks: _sd.ticks,
+        maxGapMs: Math.round(_sd.maxGapMs * 10) / 10,
+        skips: _sd.skips,
+        skippedSec: Math.round(_sd.skippedSec * 1000) / 1000,
+        lookahead: lookahead,
+        lookaheadEff: Math.round(effLookahead() * 1000) / 1000,
+        boost: Math.round(lookaheadBoost * 1000) / 1000,
+        hidden: hiddenTab(),
+        tickMs: TICK_MS,
+        src: _sd.src,
+        audioState: ctx ? String(ctx.state || 'unknown') : 'virtual',
+        audioStallCount: ctxDeadCount,
+        flightEntries: flight.length
+      };
+    },
+    resetSchedDiag: function () {
+      _sd.ticks = 0; _sd.maxGapMs = 0; _sd.lastTickWall = -1;
+      _sd.skips = 0; _sd.skippedSec = 0; _sd.src = {};
+    },
+    flightDiag: function () { return flight.slice(0); },
+    resetFlightDiag: function () {
+      flight.length = 0; flightSeq = 0; flightLastWall = -1e9;
+      flightEvent('flight-reset');
+    }
   };
 
   /* --- getters ------------------------------------------------------------- */

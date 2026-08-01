@@ -57,10 +57,132 @@
   var pluckOpen = null;      // pluck grave da nota aberta
   var shaperCurves = {};     // curvas de waveshaper por "quantidade"
 
+  /* --------------------------------------------------------------------------
+   * ORCAMENTO DE SFX — em VOZES e em NOS
+   *
+   * `voices` sozinho nao era um teto: ele conta CHAMADAS, e as chamadas nao
+   * tem o mesmo tamanho nem de longe. Medido em shots/_sfxload.html (caso
+   * ANAT), nos criados por chamada:
+   *     hit 7 · openHit 8 · miss 8 · streakUp 18 · starPowerOn 25 ·
+   *     crowdCheer 125
+   * Ou seja: 32 "vozes" tanto podem ser 224 nos (32 acertos) quanto 4000
+   * (32 gritos de plateia). Um teto que varia 18x nao e teto.
+   *
+   * Entao ha dois limites agora: o de vozes, que continua, e um de NOS VIVOS,
+   * que e o recurso que realmente se esgota. Nenhum dos dois muda um som
+   * sequer — eles so decidem se uma voz NOVA entra, exatamente como o
+   * `voices` ja fazia.
+   *
+   * O TETO DE NOS E FOLGADO DE PROPOSITO, e o numero saiu de medicao, nao de
+   * palpite. O pior caso que o jogo consegue produzir foi montado a mao em
+   * shots/_sfxab.html (caso 4): 5,5 acertos por segundo durante 6 s + um
+   * streakUp + um erro + Star Power ligando + DOIS gritos de plateia
+   * sobrepostos. Nessa bancada a limpeza fica SUSPENSA durante o render (ver
+   * o bloco de timers em shots/_sfxdrive.js), entao o numero que sai — 535
+   * nos — e um TETO ESTRITO: e tudo que foi criado em 6,5 s sem nada ser
+   * devolvido. A simultaneidade real e menor. Um teto de 320 recusava vozes
+   * ate nesse teste, e teto que dispara em jogo normal nao e protecao, e
+   * defeito. Com 1024 sobra quase 2x sobre o limite superior de um cenario ja
+   * mais duro que o jogo, e o caso patologico (uma duzia de plateias
+   * empilhadas) ainda para de pe.
+   * ------------------------------------------------------------------------ */
   var voices = 0;            // vozes de sfx ativas (evita avalanche de nos)
   var MAX_VOICES = 32;
+  var liveNodes = 0;         // nos de SFX vivos (criados e ainda conectados)
+  var MAX_SFX_NODES = 1024;
+  var peakVoices = 0, peakNodes = 0, droppedVoices = 0, droppedNodes = 0;
 
   var ambience = null;       // nos do leito de plateia continuo
+
+  /* ==========================================================================
+   * ESTABILIDADE DE AUDIO (latencyHint) — o remedio para o "corta"
+   *
+   * O jogador relatou "trepidada de ruido quando tem muitos objetos", com o
+   * Gerenciador de Tarefas mostrando CPU 36% e as duas GPUs em ~30% DURANTE o
+   * jogo. Maquina folgada e som cortando ao mesmo tempo tem uma explicacao so:
+   * UNDERRUN. A thread de audio do navegador e UMA, processa blocos de 128
+   * amostras e tem `bufferSize/sampleRate` para entregar cada lote. Se o lote
+   * atrasa, a placa recebe silencio — e silencio no meio de uma onda e um
+   * estalo. Nada disso aparece na CPU total, porque o gargalo e um PRAZO de
+   * uma thread, nao a capacidade da maquina.
+   *
+   * A medicao (shots/_dspload.html + tools/dsprun.sh, OfflineAudioContext com
+   * DSP de verdade) mostrou que esta trilha e cara por construcao e que a
+   * conta esta espalhada: o grafo fixo responde por so ~14% e o resto sao as
+   * vozes, com a guitarra custando ~4x por nota o que custa qualquer outra
+   * familia. Nao ha um vilao para remover — cortar custo de verdade exigiria
+   * mudar o som, e o jogador disse que a musica esta EXCELENTE.
+   *
+   * Sobra a outra alavanca, que e maior e nao custa uma amostra de timbre:
+   * DAR FOLGA A THREAD. `latencyHint` nao altera o DSP; altera o tamanho do
+   * lote de saida, ou seja, quantos blocos de 128 amostras a thread pode
+   * adiantar antes que a placa fique sem nada. Com 'interactive' (o que estava
+   * aqui) o navegador escolhe o MENOR lote viavel: latencia minima e folga
+   * minima — basta um soluco de poucos milissegundos para furar. Com
+   * 'playback' o lote e varias vezes maior: a mesma CPU, o mesmo DSP, mas o
+   * soluco cabe dentro da folga e nao vira estalo.
+   *
+   * O preco e latencia — que num jogo de ritmo seria proibitivo se o jogo nao
+   * compensasse. Este compensa: `GH.Settings.audioOffsetMs` existe e o
+   * `setStability` abaixo REESCREVE esse offset sozinho pela diferenca medida
+   * em `ctx.baseLatency`, para o jogador nao ter de refazer a calibracao.
+   *
+   * O padrao e 'balanced': dobra a folga em relacao ao que estava aqui, com
+   * um acrescimo de latencia que a compensacao automatica absorve. Quem tiver
+   * maquina sobrando escolhe 'interactive'; quem ainda ouvir corte escolhe
+   * 'playback'.
+   * ======================================================================== */
+  var STAB_KEY = 'guitarrada-hero.audio.v1';
+  var VALID_STAB = { interactive: 1, balanced: 1, playback: 1 };
+  var stability = 'balanced';
+  // baseLatency (ms) observada da ultima vez que o offset foi compensado.
+  // Guardar isto e o que impede a compensacao de ser aplicada duas vezes.
+  var stabRefMs = -1;
+
+  function stabLoad() {
+    try {
+      if (!window.localStorage) return;
+      var raw = window.localStorage.getItem(STAB_KEY);
+      if (!raw) return;
+      var o = JSON.parse(raw);
+      if (o && o.stability && VALID_STAB[o.stability]) stability = o.stability;
+      if (o && typeof o.refMs === 'number' && isFinite(o.refMs)) stabRefMs = o.refMs;
+    } catch (e) { /* localStorage pode nem existir em file:// */ }
+  }
+  function stabSave() {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.setItem(STAB_KEY,
+        JSON.stringify({ stability: stability, refMs: stabRefMs }));
+    } catch (e) {}
+  }
+  stabLoad();
+
+  /* Compensa o offset de calibracao pela MUDANCA de latencia do contexto.
+     So a diferenca entra: o valor absoluto de baseLatency ja estava embutido
+     na calibracao que o jogador fez com os proprios ouvidos, e sobrescrever o
+     numero dele seria pior que nao fazer nada. Positivo = som sai depois =
+     relogio de jogo atrasa na mesma medida. */
+  function recalibrateOffset() {
+    if (!ctx) return 0;
+    var bl = (typeof ctx.baseLatency === 'number' && isFinite(ctx.baseLatency))
+      ? ctx.baseLatency * 1000 : -1;
+    if (bl < 0) return 0;
+    if (stabRefMs < 0) { stabRefMs = bl; stabSave(); return 0; }
+    var delta = bl - stabRefMs;
+    stabRefMs = bl;
+    stabSave();
+    // Menos de 1 ms nao e mudanca de buffer, e ruido de medicao do navegador.
+    if (Math.abs(delta) < 1) return 0;
+    try {
+      var S = GH.Settings;
+      if (!S || typeof S.audioOffsetMs !== 'number') return delta;
+      var v = S.audioOffsetMs + delta;
+      S.audioOffsetMs = v < -500 ? -500 : (v > 500 ? 500 : v);
+      if (typeof S.save === 'function') S.save();
+    } catch (e) {}
+    return delta;
+  }
 
   // Volumes padrao por barramento. GH.Settings (conductor.js) sobrescreve.
   var DEFAULT_VOL = {
@@ -178,6 +300,60 @@
 
   function fillWhite(data, rnd) {
     for (var i = 0; i < data.length; i++) data[i] = rnd() * 2 - 1;
+  }
+
+  /* --------------------------------------------------------------------------
+   * LACO SEM DEGRAU
+   *
+   * Todos os ruidos deste arquivo sao tocados com `loop = true`. Um buffer de
+   * ruido gerado amostra a amostra NAO comeca nem termina em zero: quando o
+   * laco volta, a saida salta de x[n-1] para x[0] numa amostra so.
+   *
+   * Para o ruido BRANCO tanto faz — branco ja e salto, o degrau some na
+   * textura. Para o ROSA e o MARROM nao: neles o valor passeia devagar (-3 e
+   * -6 dB/oitava), entao o degrau e uma DESCONTINUIDADE DE BAIXA FREQUENCIA
+   * — um baque, repetido a cada volta do laco (4 s no rosa, 3 s no marrom),
+   * durante toda a musica, porque o leito de plateia fica ligado do countdown
+   * ao fim.
+   *
+   * MEDIDO (shots/_sfxloop.html, caso BUF), como razao entre o salto do laco e
+   * a inclinacao tipica do proprio ruido:
+   *     branco   0,33071  /  0,81762  =  0,40x   (some no ruido)
+   *     rosa[0]  0,03828  /  0,11517  =  0,33x
+   *     rosa[1]  0,43231  /  0,12890  =  3,35x   <-- degrau
+   *     marrom   0,14442  /  0,03636  =  3,97x   <-- degrau
+   *
+   * A correcao e a tecnica classica de loop de sampler, e nao muda o timbre:
+   * geramos F amostras A MAIS do que a duracao nominal e cruzamos a cauda
+   * sobre a cabeca com uma curva de POTENCIA CONSTANTE (sqrt), truncando
+   * depois para a duracao nominal. Duas fatias independentes do mesmo ruido
+   * somadas com ganhos sqrt(a) e sqrt(1-a) tem exatamente a mesma potencia
+   * que qualquer uma delas sozinha — o espectro e o nivel ficam iguais.
+   * Ao fim, a amostra 0 do buffer novo E a amostra `nominal` do temporario, e
+   * a ultima e a `nominal-1`: duas amostras VIZINHAS do ruido original. O laco
+   * passa a ser continuo por construcao, nao por sorte.
+   *
+   * Nenhum outro modulo depende destes bytes: `GH.Audio.noiseBuffer()` nao e
+   * chamado em lugar nenhum fora deste arquivo (o GH.Synth gera os proprios),
+   * entao isto nao encosta na musica que o jogador aprovou.
+   * ------------------------------------------------------------------------ */
+  var LOOP_FADE = 2048;        // ~43 ms a 48 kHz
+
+  // Preenche `fill(tmp, rnd)` com nominal+F amostras, cruza e devolve `nominal`.
+  function seamlessNoise(fill, nominal, seed) {
+    var F = Math.min(LOOP_FADE, Math.max(1, nominal >> 2));
+    var tmp = new Float32Array(nominal + F);
+    fill(tmp, mulberry32(seed));
+    var out = new Float32Array(nominal);
+    var i;
+    // i=0     -> a=0 -> out[0]   = tmp[nominal]   (vizinha de tmp[nominal-1])
+    // i=F-1   -> a=1 -> out[F-1] = tmp[F-1]       (vizinha de tmp[F])
+    for (i = 0; i < F; i++) {
+      var a = F > 1 ? i / (F - 1) : 1;
+      out[i] = tmp[i] * Math.sqrt(a) + tmp[nominal + i] * Math.sqrt(1 - a);
+    }
+    for (i = F; i < nominal; i++) out[i] = tmp[i];
+    return out;
   }
 
   /* --------------------------------------------------------------------------
@@ -679,24 +855,29 @@
 
   function buildBuffers() {
     var sr = ctx.sampleRate;
-    var rnd;
+
+    // TODOS os ruidos daqui sao tocados em laco, entao todos passam pelo
+    // cruzamento de cauda sobre cabeca (ver `seamlessNoise`). A duracao
+    // nominal fica igual a de sempre: o cruzamento consome amostras EXTRAS.
 
     // Branco: 2 s mono. Serve de materia-prima pra percussao e raspadas.
-    var wb = ctx.createBuffer(1, Math.floor(sr * 2), sr);
-    rnd = mulberry32(1337);
-    fillWhite(wb.getChannelData(0), rnd);
+    var nW = Math.floor(sr * 2);
+    var wb = ctx.createBuffer(1, nW, sr);
+    wb.getChannelData(0).set(seamlessNoise(fillWhite, nW, 1337));
     noiseBuf.white = wb;
 
     // Rosa: 4 s ESTEREO com canais descorrelacionados (Kellett na esquerda,
     // Voss na direita) — a plateia precisa ser larga, nao um ponto no centro.
-    var pb = ctx.createBuffer(2, Math.floor(sr * 4), sr);
-    fillPinkKellett(pb.getChannelData(0), mulberry32(90210));
-    fillPinkVoss(pb.getChannelData(1), mulberry32(555111));
+    var nP = Math.floor(sr * 4);
+    var pb = ctx.createBuffer(2, nP, sr);
+    pb.getChannelData(0).set(seamlessNoise(fillPinkKellett, nP, 90210));
+    pb.getChannelData(1).set(seamlessNoise(fillPinkVoss, nP, 555111));
     noiseBuf.pink = pb;
 
     // Marrom: 3 s mono. Corpo grave de multidao, bumbo e trovao.
-    var bb = ctx.createBuffer(1, Math.floor(sr * 3), sr);
-    fillBrown(bb.getChannelData(0), mulberry32(24680));
+    var nB = Math.floor(sr * 3);
+    var bb = ctx.createBuffer(1, nB, sr);
+    bb.getChannelData(0).set(seamlessNoise(fillBrown, nB, 24680));
     noiseBuf.brown = bb;
 
     buildIRs();
@@ -720,8 +901,10 @@
    * Gerencia de vozes de SFX
    * ------------------------------------------------------------------------ */
   function takeVoice() {
-    if (voices >= MAX_VOICES) return false;
+    if (voices >= MAX_VOICES) { droppedVoices++; return false; }
+    if (liveNodes >= MAX_SFX_NODES) { droppedNodes++; return false; }
     voices++;
+    if (voices > peakVoices) peakVoices = voices;
     return true;
   }
 
@@ -730,12 +913,16 @@
   function releaseAt(nodes, whenCtxTime) {
     var ms = Math.max(0, (whenCtxTime - ctx.currentTime) * 1000) + 90;
     var done = false;
+    liveNodes += nodes.length;
+    if (liveNodes > peakNodes) peakNodes = liveNodes;
     setTimeout(function () {
       if (done) return;
       done = true;
       for (var i = 0; i < nodes.length; i++) {
         try { nodes[i].disconnect(); } catch (e) { /* ja desconectado */ }
       }
+      liveNodes -= nodes.length;
+      if (liveNodes < 0) liveNodes = 0;
       voices--;
       if (voices < 0) voices = 0;
     }, ms);
@@ -756,12 +943,28 @@
     return g;
   }
 
-  // Envelope percussivo padrao: ataque linear curtissimo + queda exponencial.
+  /* Envelope percussivo padrao: ataque linear curtissimo + queda exponencial.
+   *
+   * A rampa exponencial NUNCA chega a zero (por isso o alvo e 0,0001): ela so
+   * se aproxima. Sem o remate abaixo, o ganho fica parado em 0,0001 ate a
+   * fonte ser parada e o no desconectado — e um `stop()`/`disconnect()` sobre
+   * um valor diferente de zero e, por definicao, um degrau. 0,0001 e -80 dBFS
+   * e sozinho ninguem ouve, mas a regra "toda voz termina em zero exato" e o
+   * que impede a classe inteira de estalo, e custa quatro milissegundos que
+   * ficam 80 dB abaixo do som. Ver `ZERO_TAIL`. */
+  var ZERO_TAIL = 0.004;
   function perc(param, t0, peak, attack, decay) {
     param.cancelScheduledValues(t0);
     param.setValueAtTime(0.0001, t0);
     param.linearRampToValueAtTime(Math.max(0.0002, peak), t0 + attack);
     param.exponentialRampToValueAtTime(0.0001, t0 + attack + decay);
+    param.linearRampToValueAtTime(0, t0 + attack + decay + ZERO_TAIL);
+  }
+
+  // Remate de silencio para os envelopes escritos a mao (os que nao usam
+  // perc): fecha em zero exato `ZERO_TAIL` depois do fim da queda.
+  function zeroAt(param, tEnd) {
+    try { param.linearRampToValueAtTime(0, tEnd + ZERO_TAIL); } catch (e) {}
   }
 
   function osc(type, freq, t0) {
@@ -838,6 +1041,7 @@
     g.gain.linearRampToValueAtTime(peakG, t + 0.002);
     g.gain.exponentialRampToValueAtTime(peakG * 0.34, t + 0.065);
     g.gain.exponentialRampToValueAtTime(0.0001, t + durG);
+    zeroAt(g.gain, t + durG);
 
     var pan = makePanner(lanePan(i));
 
@@ -885,6 +1089,7 @@
     g.gain.linearRampToValueAtTime(0.42, t + 0.006);
     g.gain.exponentialRampToValueAtTime(0.11, t + dur * 0.55);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    zeroAt(g.gain, t + dur);
 
     src.connect(bp); bp.connect(shaper); shaper.connect(g);
     thud.connect(thLP); thLP.connect(thG); thG.connect(sfxOut());
@@ -948,6 +1153,7 @@
     swG.gain.setValueAtTime(0.0001, t);
     swG.gain.linearRampToValueAtTime(0.30, t + 0.10);
     swG.gain.exponentialRampToValueAtTime(0.0001, t + 0.72);
+    zeroAt(swG.gain, t + 0.72);
 
     var lp = filt('lowpass', 300, 9);
     lp.frequency.setValueAtTime(280, t);
@@ -1005,10 +1211,40 @@
     var out = sfxOut();
 
     var lp = filt('lowpass', 7000, 6);
+    /* ⚠ DEFEITO CONHECIDO, DELIBERADAMENTE NAO CORRIGIDO NESTA RODADA.
+     *
+     * Esta rampa nao tem ancora: `filt()` faz `frequency.value = 7000`, e
+     * `.value` NAO e um evento de automacao. Uma rampa exponencial parte do
+     * evento anterior; sem evento anterior, o navegador a trata como tendo
+     * comecado no instante ZERO do contexto.
+     *
+     * MEDIDO em shots/_sfxramp.html — rampa 7000 -> 420 Hz agendada em
+     * t=1,00 s com alvo em t=1,38 s:
+     *     t=1,00 s   sem ancora 911 Hz   com ancora 7000 Hz
+     *     t=1,05 s   sem ancora 823 Hz   com ancora 4834 Hz
+     * Ou seja: a varredura NAO ACONTECE. No jogo, onde o contexto ja anda ha
+     * minutos quando o Star Power desliga, o filtro ja esta parado em 420 Hz
+     * na primeira amostra. O mesmo vale para o `lp` do sfxFail.
+     *
+     * Consertar e uma linha (`setValueAtTime(7000, t)`) e foi testado: muda o
+     * som — a varredura passa a existir. Como esta rodada e sobre TIRAR
+     * ESTALO sem mexer no que o jogador ja ouve, a correcao fica registrada
+     * aqui e nao entra. Quem for mexer no timbre destes dois efeitos comeca
+     * por isto. */
     lp.frequency.exponentialRampToValueAtTime(420, t + 0.38);
     var g = ctx.createGain();
+    /* Este ganho entra CHEIO na primeira amostra, sem rampa de ataque — a
+     * unica voz de SFX assim. Parece um estalo esperando para acontecer, e
+     * chegou a ganhar 3 ms de rampa nesta rodada. A medicao desfez a suspeita
+     * e a rampa foi tirada: o sinal que passa por aqui e um `sawtooth` que
+     * COMECA no mesmo instante `t`, e um oscilador do WebAudio parte da fase
+     * zero. Nao ha degrau porque nao ha sinal para degrau nenhum — a contagem
+     * de saltos > 0,20 no render deste efeito e ZERO, antes e depois
+     * (tools/sfxab.sh, teste `spoff`). Rampa que nao conserta nada e so
+     * mudanca de som, e o som nao e nosso para mudar. */
     g.gain.setValueAtTime(0.22, t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+    zeroAt(g.gain, t + 0.42);
     lp.connect(g); g.connect(out);
 
     var o = osc('sawtooth', 780, t);
@@ -1070,11 +1306,15 @@
     var dur = 1.5;
 
     var lp = filt('lowpass', 2600, 4);
+    // ⚠ Mesma rampa sem ancora do sfxStarPowerOff — ver o comentario longo la.
+    // A varredura de filtro deste efeito tambem nao acontece no jogo. Nao
+    // corrigido aqui de proposito: mudaria o som.
     lp.frequency.exponentialRampToValueAtTime(180, t + dur);
     var g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
     g.gain.linearRampToValueAtTime(0.42, t + 0.03);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    zeroAt(g.gain, t + dur);
     var drive = ctx.createWaveShaper();
     drive.curve = shaperCurve(0.42);
     drive.oversample = '2x';
@@ -1155,21 +1395,50 @@
     var out = buses.crowd || sfxOut();
     var dur = 1.2 + lv * 2.2;
 
+    /* ENVELOPE E RESPIRACAO EM SERIE, NAO SOMADOS NO MESMO PARAMETRO.
+     *
+     * Antes, o LFO da respiracao era ligado direto em `main.gain`, ou seja, o
+     * ganho final era `envelope(t) + lfo(t)*profundidade`. Uma soma. E uma
+     * soma nao consegue fechar: o envelope podia descer ate 0,0001 que o
+     * ganho continuava oscilando com a amplitude inteira do LFO. Quando as
+     * fontes eram paradas, o que se cortava nao era silencio — era sinal.
+     *
+     * MEDIDO (shots/_sfxloop.html, caso CHEER, crowdCheer(1.0)): o envelope
+     * chega a 0,0001 em t=3,60 s, mas o RMS nos 100 ms SEGUINTES era 0,02417
+     * — MAIOR que os 0,02097 dos 100 ms anteriores. E no `stop()`, em
+     * t=3,80 s, havia um salto de 0,02637, 3,05x a inclinacao tipica do sinal
+     * ali. Isso e um corte seco, nao um fim de som.
+     *
+     * Agora sao dois estagios em serie: `breath` carrega a modulacao (1 +
+     * lfo*profundidade_RELATIVA) e `main` carrega so o envelope. O produto no
+     * patamar e IDENTICO ao que era — a profundidade relativa e exatamente
+     * D/P, entao P*(1 + lfo*D/P) = P + lfo*D. A diferenca aparece so nas
+     * bordas, onde agora a modulacao encolhe junto com o envelope e o som
+     * chega de fato a zero (que e, alias, como uma plateia de verdade some). */
+    var peakG = 0.35 + lv * 0.55;
+    var lfoDepth = 0.16 + lv * 0.12;
+
     var main = ctx.createGain();
     main.gain.setValueAtTime(0.0001, t);
-    main.gain.linearRampToValueAtTime(0.35 + lv * 0.55, t + 0.16 + (1 - lv) * 0.2);
-    main.gain.setValueAtTime(0.35 + lv * 0.55, t + dur * 0.45);
+    main.gain.linearRampToValueAtTime(peakG, t + 0.16 + (1 - lv) * 0.2);
+    main.gain.setValueAtTime(peakG, t + dur * 0.45);
     main.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    zeroAt(main.gain, t + dur);
     main.connect(out);
     var sR = sendFrom(main, 'reverb', 0.45);
-    var nodes = [main];
+
+    var breath = ctx.createGain();
+    breath.gain.value = 1;
+    breath.connect(main);
+
+    var nodes = [main, breath];
     if (sR) nodes.push(sR);
 
     // Corpo (vozes): rosa filtrado numa banda larga em torno de 900 Hz.
     var body = noiseSrc('pink', true);
     var bodyBP = filt('bandpass', 780 + lv * 260, 0.55);
     var bodyG = ctx.createGain(); bodyG.gain.value = 0.85;
-    body.connect(bodyBP); bodyBP.connect(bodyG); bodyG.connect(main);
+    body.connect(bodyBP); bodyBP.connect(bodyG); bodyG.connect(breath);
     body.start(t, Math.random() * 2);
     body.stop(t + dur + 0.2);
 
@@ -1177,7 +1446,7 @@
     var air = noiseSrc('pink', true);
     var airHP = filt('highpass', 2600, 0.7);
     var airG = ctx.createGain(); airG.gain.value = 0.14 + lv * 0.20;
-    air.connect(airHP); airHP.connect(airG); airG.connect(main);
+    air.connect(airHP); airHP.connect(airG); airG.connect(breath);
     air.start(t, Math.random() * 2);
     air.stop(t + dur + 0.2);
 
@@ -1185,15 +1454,16 @@
     var chest = noiseSrc('brown', true);
     var chestLP = filt('lowpass', 300, 0.8);
     var chestG = ctx.createGain(); chestG.gain.value = 0.22 + lv * 0.18;
-    chest.connect(chestLP); chestLP.connect(chestG); chestG.connect(main);
+    chest.connect(chestLP); chestLP.connect(chestG); chestG.connect(breath);
     chest.start(t, Math.random() * 1.5);
     chest.stop(t + dur + 0.2);
 
-    // Respiracao: LFO lento modulando o ganho. Sem isso soa a maquina de vento.
+    // Respiracao: LFO lento modulando o estagio em serie. Sem isso soa a
+    // maquina de vento.
     var lfo = osc('sine', 0.55 + Math.random() * 0.5, t);
     var lfoG = ctx.createGain();
-    lfoG.gain.value = 0.16 + lv * 0.12;
-    lfo.connect(lfoG); lfoG.connect(main.gain);
+    lfoG.gain.value = lfoDepth / peakG;     // profundidade RELATIVA
+    lfo.connect(lfoG); lfoG.connect(breath.gain);
     lfo.start(t); lfo.stop(t + dur + 0.2);
 
     nodes.push(body, bodyBP, bodyG, air, airHP, airG, chest, chestLP, chestG, lfo, lfoG);
@@ -1232,44 +1502,66 @@
         g.connect(out);
         var sR = sendFrom(g, 'reverb', 0.5);
 
+        /* Mesmo conserto do crowdCheer, e aqui ele importa mais: este leito
+         * fica ligado do countdown ao fim da musica. As duas LFOs somavam
+         * +-0,19 ABSOLUTOS no proprio `g.gain`. Duas consequencias:
+         *   1. o fade de saida ia para 0,0001 e o ganho continuava passeando
+         *      em +-0,19 — quando o setTimeout parava as fontes, cortava som;
+         *   2. a profundidade nao acompanhava o volume: com o leito baixo
+         *      (`level` < 0,19) o ganho chegava a ficar NEGATIVO, invertendo
+         *      a fase da plateia em vez de abaixa-la.
+         * Agora a modulacao mora num estagio em serie e e RELATIVA. A
+         * referencia e 0,75 — o nivel que o jogo usa do countdown em diante,
+         * onde o jogador de fato escuta — entao ali a modulacao e a mesma de
+         * sempre (0,16*0,75 = 0,12 e 0,0933*0,75 = 0,07). */
+        var breath = ctx.createGain();
+        breath.gain.value = 1;
+        breath.connect(g);
+
         var body = noiseSrc('pink', true);
         var bp = filt('bandpass', 720, 0.5);
         var bg = ctx.createGain(); bg.gain.value = 0.8;
-        body.connect(bp); bp.connect(bg); bg.connect(g);
+        body.connect(bp); bp.connect(bg); bg.connect(breath);
 
         var chest = noiseSrc('brown', true);
         var clp = filt('lowpass', 250, 0.7);
         var cg2 = ctx.createGain(); cg2.gain.value = 0.3;
-        chest.connect(clp); clp.connect(cg2); cg2.connect(g);
+        chest.connect(clp); clp.connect(cg2); cg2.connect(breath);
 
         var air = noiseSrc('pink', true);
         var ahp = filt('highpass', 3000, 0.7);
         var ag = ctx.createGain(); ag.gain.value = 0.10;
-        air.connect(ahp); ahp.connect(ag); ag.connect(g);
+        air.connect(ahp); ahp.connect(ag); ag.connect(breath);
 
         // Duas LFOs incomensuraveis: a modulacao nunca repete o mesmo padrao.
-        var l1 = osc('sine', 0.13, t), l1g = ctx.createGain(); l1g.gain.value = 0.12;
-        var l2 = osc('sine', 0.071, t), l2g = ctx.createGain(); l2g.gain.value = 0.07;
-        l1.connect(l1g); l1g.connect(g.gain);
-        l2.connect(l2g); l2g.connect(g.gain);
+        var l1 = osc('sine', 0.13, t), l1g = ctx.createGain(); l1g.gain.value = 0.12 / 0.75;
+        var l2 = osc('sine', 0.071, t), l2g = ctx.createGain(); l2g.gain.value = 0.07 / 0.75;
+        l1.connect(l1g); l1g.connect(breath.gain);
+        l2.connect(l2g); l2g.connect(breath.gain);
 
         body.start(t, Math.random() * 2);
         chest.start(t, Math.random() * 1.5);
         air.start(t, Math.random() * 2);
         l1.start(t); l2.start(t);
 
-        ambience = { g: g, nodes: [g, body, bp, bg, chest, clp, cg2, air, ahp, ag, l1, l1g, l2, l2g] };
+        ambience = {
+          g: g,
+          nodes: [g, breath, body, bp, bg, chest, clp, cg2, air, ahp, ag, l1, l1g, l2, l2g]
+        };
         if (sR) ambience.nodes.push(sR);
       }
-      ambience.g.gain.cancelScheduledValues(t);
+      holdParamAt(ambience.g.gain, t);
       ambience.g.gain.setValueAtTime(Math.max(0.0001, ambience.g.gain.value), t);
       ambience.g.gain.linearRampToValueAtTime(Math.max(0.0002, lv), t + 1.2);
     } else if (ambience) {
       var amb = ambience;
       ambience = null;
-      amb.g.gain.cancelScheduledValues(t);
+      holdParamAt(amb.g.gain, t);
       amb.g.gain.setValueAtTime(Math.max(0.0001, amb.g.gain.value), t);
       amb.g.gain.linearRampToValueAtTime(0.0001, t + 0.8);
+      // Zero exato antes de qualquer stop(): agora que a modulacao saiu do
+      // caminho do envelope, esta rampa realmente chega ao silencio.
+      amb.g.gain.linearRampToValueAtTime(0, t + 0.82);
       setTimeout(function () {
         for (var i = 0; i < amb.nodes.length; i++) {
           try { if (amb.nodes[i].stop) amb.nodes[i].stop(); } catch (e) {}
@@ -1297,14 +1589,40 @@
     var AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) { muted = true; ctx = null; return GH.Audio; }
 
+    // MIGRACAO DE QUEM JA CALIBROU.
+    // Ate esta rodada o contexto era criado com 'interactive', fixo. Quem ja
+    // passou pela calibracao ajustou o audioOffsetMs COM aquele buffer. Se
+    // trocarmos o padrao para 'balanced' sem mais nada, a calibracao dele
+    // passa a estar errada pela diferenca de latencia — e o jogador nao teria
+    // como saber por que "o jogo ficou injusto".
+    // Entao, na primeira vez, medimos a latencia que 'interactive' daria
+    // NESTA maquina, e guardamos como referencia. `recalibrateOffset()` logo
+    // abaixo compensa a diferenca sozinho. Custa um AudioContext descartavel,
+    // uma unica vez na vida da instalacao.
+    if (stabRefMs < 0) {
+      try {
+        var ref = new AC({ latencyHint: 'interactive' });
+        if (typeof ref.baseLatency === 'number' && isFinite(ref.baseLatency)) {
+          stabRefMs = ref.baseLatency * 1000;
+          stabSave();
+        }
+        try { ref.close(); } catch (eR) {}
+      } catch (eR2) { /* sem referencia: recalibrateOffset() nao mexe em nada */ }
+    }
+
     try {
-      // latencyHint 'interactive' = o navegador escolhe o menor buffer viavel.
-      // Em jogo de ritmo, latencia baixa vale mais que estabilidade de CPU.
-      ctx = new AC({ latencyHint: 'interactive' });
+      // Ver o bloco "ESTABILIDADE DE AUDIO" no topo: o hint NAO muda o DSP,
+      // muda quanto tempo a thread de audio tem de folga antes de furar o
+      // prazo. Era fixo em 'interactive' (folga minima). Agora e escolha do
+      // jogador, com padrao 'balanced'.
+      ctx = new AC({ latencyHint: stability });
     } catch (e) {
       try { ctx = new AC(); } catch (e2) { ctx = null; }
     }
     if (!ctx) { muted = true; return GH.Audio; }
+    // Corrige audioOffsetMs pela DIFERENCA de latencia em relacao a
+    // referencia guardada — o jogador nao refaz a calibracao.
+    recalibrateOffset();
 
     try {
       buildGraph();
@@ -1332,6 +1650,20 @@
       }
       if (s.reverbIR) setReverbIR(s.reverbIR);
     } catch (e) { /* configuracao invalida nao pode derrubar o audio */ }
+  }
+
+  /* Troca a cauda de uma automacao sem criar um degrau. A leitura no fallback
+     precisa acontecer ANTES de cancelScheduledValues(), pois o cancelamento
+     pode restaurar imediatamente o valor anterior da timeline. */
+  function holdParamAt(param, when) {
+    if (!param) return;
+    if (typeof param.cancelAndHoldAtTime === 'function') {
+      param.cancelAndHoldAtTime(when);
+      return;
+    }
+    var v = param.value;
+    param.cancelScheduledValues(when);
+    param.setValueAtTime(v, when);
   }
 
   // Destrava o contexto no primeiro gesto do usuario (politica de autoplay).
@@ -1370,8 +1702,7 @@
     if (!ctx) return;
     var t = ctx.currentTime;
     try {
-      param.cancelScheduledValues(t);
-      param.setValueAtTime(param.value, t);
+      holdParamAt(param, t);
       param.linearRampToValueAtTime(v, t + 0.03);
     } catch (e) { try { param.value = v; } catch (e2) {} }
   }
@@ -1399,11 +1730,9 @@
     var when = ctx.currentTime;
     try {
       // Rampa de 80 ms: mudar delayTime de supetao produz um "zip" de fita.
-      fx.delayL.delayTime.cancelScheduledValues(when);
-      fx.delayL.delayTime.setValueAtTime(fx.delayL.delayTime.value, when);
+      holdParamAt(fx.delayL.delayTime, when);
       fx.delayL.delayTime.linearRampToValueAtTime(t, when + 0.08);
-      fx.delayR.delayTime.cancelScheduledValues(when);
-      fx.delayR.delayTime.setValueAtTime(fx.delayR.delayTime.value, when);
+      holdParamAt(fx.delayR.delayTime, when);
       fx.delayR.delayTime.linearRampToValueAtTime(t, when + 0.08);
     } catch (e) {
       try { fx.delayL.delayTime.value = t; fx.delayR.delayTime.value = t; } catch (e2) {}
@@ -1427,8 +1756,7 @@
     var t = ctx.currentTime;
     var dur = seconds > 0 ? seconds : 0.5;
     try {
-      node.gain.cancelScheduledValues(t);
-      node.gain.setValueAtTime(node.gain.value, t);
+      holdParamAt(node.gain, t);
       node.gain.linearRampToValueAtTime(base * clamp(amount, 0, 1), t + 0.05);
       node.gain.linearRampToValueAtTime(base, t + dur);
     } catch (e) {}
@@ -1525,8 +1853,124 @@
     impulseResponse: function (name) { return irs[name] || null; },
 
     buses: buses,
-    fx: fx
+    fx: fx,
+
+    /* DIAGNOSTICO DO CAMINHO DO CLIQUE — mede, NA MAQUINA DO JOGADOR, o que
+     * as bancadas so conseguem medir no headless: quantas vozes e quantos nos
+     * de SFX estao vivos agora, o pico ja visto na partida e quantas vozes
+     * foram recusadas por cada um dos dois tetos. Se `dropVoices` ou
+     * `dropNodes` sairem de zero em jogo normal, o orcamento e que esta
+     * errado — nao o som. Espelha GH.Synth.diag()/GH.Conductor.schedDiag(). */
+    sfxDiag: function () {
+      return {
+        voices: voices, maxVoices: MAX_VOICES, peakVoices: peakVoices,
+        nodes: liveNodes, maxNodes: MAX_SFX_NODES, peakNodes: peakNodes,
+        dropVoices: droppedVoices, dropNodes: droppedNodes
+      };
+    },
+    sfxDiagReset: function () {
+      peakVoices = voices; peakNodes = liveNodes;
+      droppedVoices = 0; droppedNodes = 0;
+    },
+
+    /* ---- ESTABILIDADE DE AUDIO (ver o bloco no topo do arquivo) --------
+     * 'interactive' menor latencia, MENOS folga contra underrun
+     * 'balanced'    o padrao: dobra a folga, latencia ainda baixa
+     * 'playback'    maxima folga, para maquina que ainda corta
+     *
+     * O `latencyHint` so pode ser escolhido na CRIACAO do AudioContext, e
+     * derrubar o contexto no meio da musica cortaria o som e desancoraria o
+     * relogio mestre (GH.Conductor). Entao a troca vale a partir do proximo
+     * boot — e devolvemos `false` justamente para o menu poder avisar isso
+     * em vez de fingir que ja mudou. Na volta, `recalibrateOffset()` corrige
+     * `GH.Settings.audioOffsetMs` pela diferenca medida de `baseLatency`,
+     * sozinho: o jogador nao refaz a calibracao por ter mudado de opcao. */
+    setStability: function (name) {
+      try {
+        if (!VALID_STAB[name] || name === stability) return false;
+        stability = name;
+        stabSave();
+        return !ctx;   // true = ja vale agora (contexto ainda nao existe)
+      } catch (e) { return false; }
+    },
+    stabilityOptions: function () { return ['interactive', 'balanced', 'playback']; },
+
+    /* SONDA DE CAPACIDADE DE DSP — mede, NA MAQUINA DO JOGADOR, quanto
+     * custa processar o audio deste jogo. Renderiza um grafo-modelo com a
+     * mesma forma de uma voz de guitarra (oscilador + saturador com
+     * sobreamostragem + filtro ressonante + linha de atraso realimentada) e
+     * devolve a RAZAO DE TEMPO REAL: tempo de parede / segundos de audio.
+     *
+     * Existe porque o headless nao e a maquina do jogador — e a unica fonte
+     * de verdade sobre underrun e o hardware onde o jogo roda. O resultado
+     * alimenta GH.Synth.dspDiag() e o overlay de diagnostico.
+     *
+     * `voices` diz quantas copias do modelo renderizar; o custo cresce junto
+     * e e assim que se descobre quantas vozes a maquina aguenta. Assincrono
+     * (startRendering devolve promessa) e sem efeito nenhum no audio que
+     * esta tocando: o OfflineAudioContext e um mundo a parte. */
+    probeDsp: function (voices, cb) {
+      var done = typeof cb === 'function' ? cb : function () {};
+      try {
+        var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        if (!OAC) { done(null); return; }
+        var n = voices > 0 ? (voices | 0) : 24;
+        var sr = ctx ? (ctx.sampleRate || 48000) : 48000;
+        var secs = 0.5;
+        var oc = new OAC(2, Math.round(sr * secs), sr);
+        var out = oc.createGain(); out.gain.value = 0.02; out.connect(oc.destination);
+        for (var i = 0; i < n; i++) {
+          var f = 110 * Math.pow(2, (i % 24) / 12);
+          var o = oc.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+          var g = oc.createGain(); g.gain.value = 0.3;
+          var ws = oc.createWaveShaper();
+          ws.curve = shaperCurve ? shaperCurve(2) : null;
+          ws.oversample = '2x';
+          var bq = oc.createBiquadFilter();
+          bq.type = 'lowpass'; bq.frequency.value = f * 4; bq.Q.value = 6;
+          // Linha de atraso realimentada: e o que o Karplus-Strong faz por voz.
+          var dl = oc.createDelay(0.05); dl.delayTime.value = 1 / f * 4;
+          var fb = oc.createGain(); fb.gain.value = 0.7;
+          var dp = oc.createBiquadFilter();
+          dp.type = 'lowpass'; dp.frequency.value = 3000; dp.Q.value = -6;
+          o.connect(g); g.connect(ws); ws.connect(bq); bq.connect(out);
+          bq.connect(dl); dl.connect(dp); dp.connect(fb); fb.connect(dl);
+          dl.connect(out);
+          o.start(0); o.stop(secs);
+        }
+        var w0 = (window.performance && performance.now) ? performance.now() : 0;
+        oc.startRendering().then(function () {
+          var wall = ((window.performance && performance.now) ? performance.now() : 0) - w0;
+          var ratio = wall / 1000 / secs;
+          done({
+            voices: n, seconds: secs, wallMs: Math.round(wall * 100) / 100,
+            ratio: Math.round(ratio * 10000) / 10000,
+            perVoice: Math.round(ratio / n * 1000000) / 1000000,
+            sampleRate: sr,
+            verdict: ratio < 0.10 ? 'folgado'
+                   : (ratio < 0.30 ? 'aceitavel'
+                   : (ratio < 0.60 ? 'arriscado' : 'RISCO DE UNDERRUN'))
+          });
+        }, function () { done(null); });
+      } catch (e) { done(null); }
+    }
   };
+
+  Object.defineProperty(GH.Audio, 'stability', { get: function () { return stability; } });
+  // Folga da thread de audio, em blocos de 128 amostras. E ISTO que decide se
+  // um soluco vira estalo: 2 blocos de folga furam com 5 ms de atraso; 16 nao.
+  Object.defineProperty(GH.Audio, 'slackBlocks', {
+    get: function () {
+      if (!ctx || typeof ctx.baseLatency !== 'number' || !isFinite(ctx.baseLatency)) return -1;
+      return Math.round(ctx.baseLatency * (ctx.sampleRate || 48000) / 128 * 10) / 10;
+    }
+  });
+  Object.defineProperty(GH.Audio, 'baseLatency', {
+    get: function () {
+      if (!ctx || typeof ctx.baseLatency !== 'number' || !isFinite(ctx.baseLatency)) return -1;
+      return ctx.baseLatency;
+    }
+  });
 
   Object.defineProperty(GH.Audio, 'ctx', { get: function () { return ctx; } });
   Object.defineProperty(GH.Audio, 'master', { get: function () { return masterGain; } });

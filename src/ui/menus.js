@@ -3612,6 +3612,14 @@
       set: function (v) { setSetting('showFPS', v); }
     });
     row(col2, {
+      label: 'Plateia 3D', kind: 'toggle',
+      get: function () { return !!setting('crowd3D', true); },
+      set: function (v) {
+        setSetting('crowd3D', v);
+        call('Stage', 'setCrowdEnabled', v);
+      }
+    });
+    row(col2, {
       label: 'Plateia nos menus', kind: 'toggle',
       get: function () { return !!setting('crowdAmbience', true); },
       set: function (v) { setSetting('crowdAmbience', v); call('Audio', 'ambience', v, 0.5); }

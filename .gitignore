@@ -2,7 +2,9 @@
 # GUITARRADA HERO — .gitignore
 #
 # SO O ESSENCIAL PARA O JOGO RODAR vai para o repositorio / GitHub Pages:
-#   index.html, src/, vendor/, README.md, LICENSE, .nojekyll, .gitignore
+#   index.html, favicon, src/, vendor/, README.md, LICENSE e .nojekyll.
+# O gerador de stems tambem e versionado: ele e necessario para acrescentar
+# musicas sem reintroduzir a sintese pesada durante a partida.
 # (todos auditados: nenhum caminho absoluto de maquina, nenhum nome de
 #  usuario, nenhuma URL externa.)
 # TUDO que e de DESENVOLVIMENTO fica local. Todo o resto abaixo fica FORA.
@@ -26,13 +28,17 @@ shots/
 # Nada disto e necessario para JOGAR. O jogo nao tem build: e index.html +
 # <script> classico. Quem quiser desenvolver pega o repo de desenvolvimento.
 
-# Ferramentas de captura headless, lint, testes de input e comparacao A/B.
-tools/
+# Ferramentas de captura headless, lint, testes de input e comparacao A/B
+# ficam locais. Excecao: o gerador de musica faz parte do produto/manutencao.
+tools/*
+!tools/generate-stems.html
+!tools/generate-stems.ps1
 
 # Documentacao interna: contrato entre agentes, estado do trabalho e o
 # briefing das imagens que ainda podem ser geradas.
 ARCHITECTURE.md
 ESTADO.md
+DIAGNOSTICO_AUDIO_RACHANDO.md
 art_briefs/
 art_source/
 
@@ -44,9 +50,10 @@ _nt_probe.html.tmp/
 cv_debug.log
 chrome_debug.log
 
-# === Pasta de assets em arquivo (nao existe por contrato) =================
-# O jogo e 100% procedural: nao ha imagem nem audio em arquivo. A pasta so
-# fica aqui como lembrete; nada dentro dela deve ser versionado.
+# === Assets gerados localmente ============================================
+# Os WAVs de stems sao derivados reproduziveis da musica procedural e podem
+# ocupar centenas de MB. tools/generate-stems.ps1 os recria; quando faltam, o
+# jogo usa automaticamente o sintetizador ao vivo. Nao versionar os binarios.
 assets/
 
 # === Lixo de sistema e editor =============================================

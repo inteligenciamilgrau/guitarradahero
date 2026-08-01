@@ -1584,6 +1584,12 @@
 
     reset();
     probeMetrics();
+
+    /* Overlay de diagnostico (secao 13): so instala a tecla F3 e o ouvinte da
+       configuracao. Nada de DOM, nada de CSS, nada de timer enquanto o painel
+       estiver fechado. */
+    try { diagHook(); } catch (e2) { /* o jogo nao depende do diagnostico */ }
+
     return GH.HUD;
   }
 
@@ -1704,9 +1710,17 @@
 
   function dispose() {
     if (!inited) return;
+    /* o painel de diagnostico e um irmao do HUD no mesmo container: desliga o
+       timer e o updater antes de sumir com o DOM */
+    try { diagApply(false); } catch (e0) { /* ok */ }
+    try { if (dg.root && dg.root.parentNode) dg.root.parentNode.removeChild(dg.root); } catch (e1) { /* ok */ }
+    dg.root = null; dg.built = false; dg.N = {}; dg.cache = {}; dg.soft = null;
+    var dcss = document.getElementById('gh-diag-css');
+    try { if (dcss && dcss.parentNode) dcss.parentNode.removeChild(dcss); } catch (e2) { /* ok */ }
+
     try { if (root && root.parentNode) root.parentNode.removeChild(root); } catch (e) { /* ok */ }
     var st = document.getElementById('gh-hud-css');
-    try { if (st && st.parentNode) st.parentNode.removeChild(st); } catch (e2) { /* ok */ }
+    try { if (st && st.parentNode) st.parentNode.removeChild(st); } catch (e3) { /* ok */ }
     root = null; D = {}; digitSlots.length = 0; floats.length = 0;
     inited = false;
     GH.HUD.ready = false;
@@ -1733,6 +1747,728 @@
     };
   }
 
+  /* =========================================================================
+     13. OVERLAY DE DIAGNOSTICO (tecla F3)
+     -------------------------------------------------------------------------
+     POR QUE ISTO EXISTE
+
+     Um jogador relatou que a musica "corta" na maquina dele depois de uma
+     rodada de otimizacao que zerou o problema na bancada. O Gerenciador de
+     Tarefas dele mostrava CPU a 36% e as DUAS placas de video a 0-3%. Um jogo
+     com bloom + SMAA + ACES nao roda a 0% de GPU: ou o WebGL caiu para
+     rasterizacao por SOFTWARE (a CPU desenhando pixel a pixel, na MESMA
+     thread que serve o agendador de audio), ou o navegador esta preso na GPU
+     integrada, ou o Gerenciador esta mostrando o motor errado (o padrao dele
+     e "Copy"/"Video", nao "3D" — GPU de jogo pode aparecer em 0% e estar a
+     100%).
+
+     Nenhuma dessas respostas cabe num "ta lento aqui". Este painel pergunta
+     ao driver quem esta desenhando, mede o quadro e le os contadores do
+     agendador de audio, e ainda copia tudo para a area de transferencia — o
+     jogador cola o relatorio e a gente para de adivinhar. Sem DevTools.
+
+     CUSTO
+       Desligado: zero. O DOM so e construido na primeira vez que o painel
+       acende, o updater do engine so e registrado enquanto ele esta aberto e
+       o CSS so e injetado ali. Ligado: no maximo 4 pinturas por segundo, e
+       nenhuma delas LE geometria do DOM (nada de offsetWidth/getComputedStyle
+       /getBoundingClientRect) — so escreve textContent. O laco de render
+       continua sem forcar reflow.
+     ========================================================================= */
+
+  var DIAG_PERIOD = 0.25;      // segundos entre pinturas (4x por segundo)
+  var DIAG_MIN_MS = 230;       // teto duro, valendo para as duas fontes de tick
+
+  var DIAG_CSS = [
+    '#gh-diag{position:absolute;left:1.1vmin;top:1.1vmin;z-index:900;display:none;',
+    'box-sizing:border-box;pointer-events:none;contain:layout style paint;',
+    'width:min(59ch,52vw);max-height:97.5vh;overflow:hidden;',
+    'padding:.75vmin 1vmin .85vmin;border-radius:.85vmin;',
+    'font:500 clamp(8px,1.16vmin,14px)/1.38 "Cascadia Mono","Cascadia Code",Consolas,',
+    '"DejaVu Sans Mono","Liberation Mono",monospace;',
+    /* ligadura de fonte de programador transforma "--" em travessao: num painel
+       que manda o jogador procurar por "--disable-gpu" isso e mentira na tela */
+    'font-variant-ligatures:none;-webkit-font-variant-ligatures:none;',
+    'font-feature-settings:"liga" 0,"clig" 0,"calt" 0;',
+    'letter-spacing:.005em;color:#dbe3fb;text-shadow:0 1px 0 rgba(0,0,0,.55);',
+    'background:linear-gradient(180deg,rgba(10,13,26,.90),rgba(6,8,16,.87));',
+    'border:1px solid rgba(150,175,255,.22);',
+    'box-shadow:0 1.1vmin 3.2vmin rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.07);',
+    '-webkit-backdrop-filter:blur(7px) saturate(1.15);backdrop-filter:blur(7px) saturate(1.15)}',
+    '#gh-diag.on{display:block}',
+    /* ------------------------------------------------------------ cabecalho */
+    '#gh-diag .ghd-top{display:flex;align-items:center;gap:1ch;',
+    'padding-bottom:.5vmin;margin-bottom:.5vmin;',
+    'border-bottom:1px solid rgba(150,175,255,.17)}',
+    '#gh-diag .ghd-title{flex:1 1 auto;font-weight:800;letter-spacing:.15em;font-size:.94em;',
+    'text-transform:uppercase;color:var(--gh-gold,#ffcf4a)}',
+    '#gh-diag .ghd-btn{pointer-events:auto;cursor:pointer;font:inherit;font-weight:700;',
+    'letter-spacing:.06em;color:#e6ecff;padding:.2vmin .9ch;border-radius:.45vmin;',
+    'border:1px solid rgba(150,175,255,.34);background:rgba(38,50,86,.72)}',
+    '#gh-diag .ghd-btn:hover{background:rgba(64,86,146,.85);border-color:rgba(190,212,255,.6)}',
+    '#gh-diag .ghd-btn:active{transform:translateY(1px)}',
+    '#gh-diag .ghd-toast{color:#4fe08f;font-weight:800;white-space:nowrap}',
+    /* ---------------------------------------------------------- alerta forte */
+    '#gh-diag .ghd-alert{display:none;margin:.15vmin 0 .75vmin;padding:.7vmin .9vmin;',
+    'border-radius:.55vmin;color:#fff;border:1px solid #ff5468;',
+    'background:linear-gradient(180deg,rgba(158,12,30,.94),rgba(84,4,15,.94));',
+    'box-shadow:0 0 2vmin rgba(255,50,80,.40),inset 0 1px 0 rgba(255,255,255,.16)}',
+    '#gh-diag.soft .ghd-alert{display:block}',
+    '#gh-diag .ghd-alert b{display:block;font-size:1.32em;font-weight:900;line-height:1.16;',
+    'letter-spacing:.03em;color:#fff;text-shadow:0 .18vmin .5vmin rgba(0,0,0,.75)}',
+    '#gh-diag .ghd-alert p{margin:.35vmin 0 0;font-weight:600;color:#ffdfe4}',
+    '#gh-diag .ghd-alert ol{margin:.32vmin 0 0;padding-left:2.4ch;color:#ffeef0;font-weight:500}',
+    '#gh-diag .ghd-alert li{margin:.15vmin 0}',
+    '#gh-diag .ghd-alert i{font-style:normal;color:#ffd0d6;font-weight:700}',
+    /* --------------------------------------------------------------- blocos */
+    '#gh-diag .ghd-h{margin:.5vmin 0 .18vmin;font-weight:800;font-size:.86em;',
+    'letter-spacing:.2em;text-transform:uppercase;color:#8ba2d6}',
+    '#gh-diag .ghd-h:first-child{margin-top:0}',
+    '#gh-diag .ghd-row{display:flex;gap:1ch;align-items:baseline}',
+    '#gh-diag .ghd-k{flex:0 0 14ch;color:#8290b6;font-weight:500}',
+    '#gh-diag .ghd-v{flex:1 1 auto;min-width:0;color:#eaf0ff;font-weight:700;',
+    'overflow-wrap:anywhere}',
+    '#gh-diag .ghd-v.good{color:#5ee79b}',
+    '#gh-diag .ghd-v.warn{color:#ffcf4a}',
+    '#gh-diag .ghd-v.bad{color:#ff6376}',
+    '#gh-diag .ghd-v.dim{color:#8290b6;font-weight:500}',
+    '#gh-diag .ghd-full{display:block;margin:.05vmin 0 .2vmin}',
+    '#gh-diag .ghd-full .ghd-k{display:block;flex:none}',
+    '#gh-diag .ghd-full .ghd-v{display:block;padding-left:1.6ch;line-height:1.32}',
+    /* ---------------------------------------------------------------- rodape */
+    '#gh-diag .ghd-note{margin-top:.7vmin;padding-top:.5vmin;font-weight:500;font-size:.93em;',
+    'color:#7d8ab0;border-top:1px solid rgba(150,175,255,.15)}',
+    '#gh-diag .ghd-note b{color:#a9b8e2;font-weight:700}'
+  ].join('');
+
+  /* Estado do painel. Tudo comeca vazio: nada disso e tocado com ele fechado. */
+  var dg = {
+    on: false, built: false, root: null, N: {}, cache: {},
+    acc: 0, lastMs: -1e9, timer: 0, hooked: false, soft: null,
+    toast: '', toastTimer: 0, updaterOn: false
+  };
+
+  function nowMs() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  /* ---- formatacao pt-BR (o relatorio vai ser lido por gente) --------------- */
+
+  function nDec(v, d) {
+    if (!isFinite(v)) return '—';
+    return v.toFixed(d === undefined ? 1 : d).replace('.', ',');
+  }
+  function nInt(v) {
+    if (!isFinite(v)) return '—';
+    v = _round(v);
+    var s = String(_abs(v)), out = '', c = 0;
+    for (var i = s.length - 1; i >= 0; i--) {
+      out = s.charAt(i) + out;
+      if (++c % 3 === 0 && i > 0) out = '.' + out;
+    }
+    return (v < 0 ? '-' : '') + out;
+  }
+  /* Numero grande legivel: 1.240.000 vira "1,24 M". */
+  function nBig(v) {
+    if (!isFinite(v)) return '—';
+    if (v >= 1e6) return nDec(v / 1e6, 2) + ' M';
+    if (v >= 1e4) return nDec(v / 1e3, 1) + ' k';
+    return nInt(v);
+  }
+  function nMB(bytes) {
+    if (!isFinite(bytes) || bytes <= 0) return '—';
+    return nInt(bytes / 1048576) + ' MB';
+  }
+
+  var QUAL_LABEL = { low: 'baixa', med: 'média', high: 'alta', ultra: 'ultra' };
+
+  /* ---- leitura dos tres modulos ------------------------------------------- */
+
+  /* Nada aqui pode explodir: o painel de diagnostico e a ultima coisa que pode
+     derrubar o jogo. Cada fonte vem embrulhada e um modulo ausente vira null. */
+  function diagRead() {
+    var out = { eng: null, syn: null, sch: null, flight: null, stalled: false, mem: null, cap: null };
+    try { if (GH.Engine && typeof GH.Engine.diag === 'function') out.eng = GH.Engine.diag(); } catch (e) { /* segue */ }
+    try { if (GH.Synth && typeof GH.Synth.diag === 'function') out.syn = GH.Synth.diag(); } catch (e2) { /* segue */ }
+    try { if (GH.Conductor && typeof GH.Conductor.schedDiag === 'function') out.sch = GH.Conductor.schedDiag(); } catch (e3) { /* segue */ }
+    try { if (GH.Conductor && typeof GH.Conductor.flightDiag === 'function') out.flight = GH.Conductor.flightDiag(); } catch (e31) { /* segue */ }
+    try { out.stalled = !!(GH.Conductor && GH.Conductor.audioStalled); } catch (e4) { /* segue */ }
+    try {
+      /* performance.memory so existe em Chromium — e exatamente onde o
+         jogador esta. Onde nao existir, a linha some. */
+      if (window.performance && performance.memory && performance.memory.jsHeapSizeLimit) out.mem = performance.memory;
+    } catch (e5) { out.mem = null; }
+    try { out.cap = window.__GH_CAP || null; } catch (e6) { out.cap = null; }
+    return out;
+  }
+
+  /* ---- construcao (uma vez, na primeira vez que o painel acende) ----------- */
+
+  function diagCss() {
+    if (document.getElementById('gh-diag-css')) return;
+    var st = document.createElement('style');
+    st.id = 'gh-diag-css';
+    st.textContent = DIAG_CSS;
+    document.head.appendChild(st);
+  }
+
+  function diagRow(parent, label, key, full) {
+    var r = mk('div', full ? 'ghd-row ghd-full' : 'ghd-row', parent);
+    mk('div', 'ghd-k', r, label);
+    var v = mk('div', 'ghd-v', r);
+    dg.N[key] = v;
+    dg.N[key + '$row'] = r;
+    return v;
+  }
+
+  function diagBuild(container) {
+    if (dg.built) return;
+    diagCss();
+    var host = container || (root && root.parentNode) || document.getElementById('gh-ui') || document.body;
+
+    var r = mk('div', '', host);
+    r.id = 'gh-diag';
+    dg.root = r;
+
+    /* --- cabecalho --- */
+    var top = mk('div', 'ghd-top', r);
+    mk('div', 'ghd-title', top, 'Diagnóstico · F3');
+    dg.N.toast = mk('div', 'ghd-toast', top);
+    var btn = mk('button', 'ghd-btn clickable', top, 'COPIAR (C)');
+    btn.type = 'button';
+    btn.addEventListener('click', function (ev) {
+      ev.preventDefault(); ev.stopPropagation(); diagCopy();
+    }, false);
+    /* o botao rouba o foco do teclado do jogo se deixarmos — nao pode */
+    btn.addEventListener('mousedown', function (ev) { ev.preventDefault(); }, false);
+    dg.N.btn = btn;
+
+    /* --- alerta de render por software (o achado que interessa) --- */
+    mk('div', 'ghd-alert', r,
+      '<b>RENDERIZAÇÃO POR SOFTWARE</b>' +
+      '<p>A placa de vídeo <i>não</i> está sendo usada: quem desenha é a CPU, ' +
+      'na mesma thread que agenda a música. É por isso que o som corta.</p>' +
+      '<ol>' +
+      '<li>No navegador: <i>Configurações &rsaquo; Sistema</i> &rsaquo; ligue ' +
+      '<i>"Usar aceleração de hardware quando disponível"</i> e reinicie o navegador.</li>' +
+      '<li>No Windows: <i>Configurações &rsaquo; Sistema &rsaquo; Vídeo &rsaquo; ' +
+      'Configurações gráficas</i> &rsaquo; escolha o navegador &rsaquo; ' +
+      '<i>Alto desempenho</i> (placa dedicada).</li>' +
+      '<li>Se continuar: atualize o driver da placa e confira se o navegador ' +
+      'não está aberto com <i>--disable-gpu</i>.</li>' +
+      '</ol>');
+
+    /* --- video --- */
+    mk('div', 'ghd-h', r, 'Imagem');
+    diagRow(r, 'FPS', 'fps');
+    diagRow(r, 'Pior frame', 'worst');
+    diagRow(r, 'Engasgos', 'hitch');
+    diagRow(r, 'Placa (GL)', 'glr', true);
+    diagRow(r, 'Fabricante', 'glv', true);
+    diagRow(r, 'Modo', 'mode');
+    diagRow(r, 'Resolução', 'res');
+    diagRow(r, 'Qualidade', 'qual');
+    diagRow(r, 'Desenho', 'draw');
+    diagRow(r, 'Memória GL', 'glmem');
+    diagRow(r, 'Contexto', 'ctx');
+
+    /* --- audio --- */
+    mk('div', 'ghd-h', r, 'Áudio');
+    diagRow(r, 'Relógio', 'clock');
+    diagRow(r, 'No passado', 'past');
+    diagRow(r, 'Descartadas', 'drop');
+    diagRow(r, 'Maior vão', 'gap');
+    diagRow(r, 'Lookahead', 'look');
+    diagRow(r, 'Vozes', 'voices');
+    diagRow(r, 'Reinícios', 'restarts');
+    diagRow(r, 'Música pulada', 'skip');
+
+    /* --- sistema --- */
+    mk('div', 'ghd-h', r, 'Sistema');
+    diagRow(r, 'Memória JS', 'jsmem');
+    diagRow(r, 'Máquina', 'machine');
+
+    dg.N.note = mk('div', 'ghd-note', r);
+
+    dg.built = true;
+  }
+
+  /* ---- pintura ------------------------------------------------------------ */
+
+  /* Escreve so o que mudou. `cls` entra na className, tambem so quando muda —
+     duas escritas por linha no pior caso, nenhuma leitura de layout. */
+  function dset(key, txt, cls) {
+    var n = dg.N[key];
+    if (!n) return;
+    if (dg.cache[key] !== txt) { dg.cache[key] = txt; n.textContent = txt; }
+    var c = cls ? ('ghd-v ' + cls) : 'ghd-v';
+    if (dg.cache[key + '$c'] !== c) { dg.cache[key + '$c'] = c; n.className = c; }
+  }
+  function dshow(key, on) {
+    var r = dg.N[key + '$row'];
+    if (!r) return;
+    var d = on ? '' : 'none';
+    if (dg.cache[key + '$d'] !== d) { dg.cache[key + '$d'] = d; r.style.display = d; }
+  }
+
+  function fpsClass(f) { return f >= 55 ? 'good' : (f >= 40 ? 'warn' : 'bad'); }
+  function msClass(ms) { return ms >= 90 ? 'bad' : (ms >= 45 ? 'warn' : 'good'); }
+
+  function diagPaint() {
+    var d = diagRead();
+    var e = d.eng, s = d.syn, c = d.sch;
+
+    /* ---------------- imagem ---------------- */
+    if (e) {
+      /* a janela leva 10 s para encher: antes disso dizemos o que temos, sem
+         inventar um "mínimo de 10 s" que ainda nao existe */
+      dset('fps', nDec(e.fps, 1) +
+                  (e.windowSec > 0 ? '   mín ' + e.windowSec + ' s: ' + nDec(e.fpsMin10, 1) : '   (medindo…)'),
+           e.windowSec > 0 ? fpsClass(e.fpsMin10) : 'dim');
+      dset('worst', e.windowSec > 0
+             ? nInt(e.worstMs10) + ' ms  (últimos ' + e.windowSec + ' s)'
+             : (e.worstMs10 > 0 ? nInt(e.worstMs10) + ' ms  (primeiro segundo)' : 'medindo…'),
+           e.windowSec > 0 || e.worstMs10 > 0 ? msClass(e.worstMs10) : 'dim');
+      dset('hitch', e.hitches === 0
+             ? 'nenhum desde o início'
+             : nInt(e.hitches) + ' acima de 90 ms · pior ' + nInt(e.worstMsTotal) + ' ms',
+           e.hitches === 0 ? 'good' : 'warn');
+
+      dset('glr', e.glRenderer || '(o navegador não informou)',
+           e.software ? 'bad' : (e.glRenderer ? '' : 'dim'));
+      dset('glv', e.glVendor || '(o navegador não informou)', e.software ? 'bad' : 'dim');
+
+      var kind = e.software ? 'SOFTWARE (CPU)'
+               : (e.gpuKind === 'dedicada' ? 'GPU dedicada'
+               : (e.gpuKind === 'integrada' ? 'GPU integrada' : 'GPU (modelo não identificado)'));
+      dset('mode', kind + ' · WebGL ' + (e.webgl2 ? '2' : '1') +
+                   (e.glUnmasked ? '' : ' · nome mascarado'),
+           e.software ? 'bad' : (e.gpuKind === 'integrada' ? 'warn' : 'good'));
+
+      dset('res', e.cssWidth + '×' + e.cssHeight + ' css · ' +
+                  e.bufferWidth + '×' + e.bufferHeight + ' buffer · ' +
+                  'pixelRatio ' + nDec(e.pixelRatio, 2) +
+                  ' (tela ' + nDec(e.devicePixelRatio, 2) + ')');
+
+      var ql = (QUAL_LABEL[e.quality] || e.quality);
+      var qtxt = ql + ' · ' + e.aa.toUpperCase() + (e.composer ? '' : ' · sem pós-processamento');
+      if (e.degraded) {
+        qtxt = ql + ' ← DEGRADOU de ' + (QUAL_LABEL[e.requestedQuality] || e.requestedQuality) +
+               ' (' + e.autoDowngrades + 'x)';
+      } else if (e.autoDowngrades > 0) {
+        qtxt += ' · já degradou ' + e.autoDowngrades + 'x';
+      }
+      dset('qual', qtxt, e.degraded ? 'warn' : '');
+
+      dset('draw', nInt(e.calls) + ' chamadas · ' + nBig(e.triangles) + ' triângulos');
+      dset('glmem', nInt(e.geometries) + ' geom · ' + nInt(e.textures) + ' texturas · ' +
+                    nInt(e.programs) + ' programas');
+
+      var ctxTxt = 'ok', ctxCls = 'dim';
+      if (e.contextLost) { ctxTxt = 'PERDIDO agora'; ctxCls = 'bad'; }
+      else if (e.contextLostCount > 0) {
+        ctxTxt = 'perdido ' + e.contextLostCount + 'x · restaurado ' + e.contextRestoredCount + 'x';
+        ctxCls = 'warn';
+      }
+      dset('ctx', ctxTxt, ctxCls);
+
+      /* o alerta grande e uma classe na raiz — uma escrita, e so quando vira */
+      var soft = !!e.software;
+      if (dg.soft !== soft) {
+        dg.soft = soft;
+        dg.root.className = (dg.on ? 'on' : '') + (soft ? ' soft' : '');
+      }
+    } else {
+      dset('fps', 'engine não inicializado', 'bad');
+    }
+
+    /* ---------------- audio ---------------- */
+    var hasAudio = !!(s || c);
+    if (d.cap) {
+      dset('clock', 'modo captura (sem áudio)', 'dim');
+    } else if (d.stalled) {
+      dset('clock', 'PARADO — jogo no relógio de parede', 'bad');
+    } else if (hasAudio) {
+      dset('clock', 'ok · estado ' + (c && c.audioState ? c.audioState : 'running') +
+                    (c && c.audioStallCount ? ' · parou ' + nInt(c.audioStallCount) + 'x' : ''),
+           c && c.audioStallCount ? 'warn' : 'good');
+    } else {
+      dset('clock', 'áudio ainda não iniciado', 'dim');
+    }
+
+    if (s) {
+      dset('past', nInt(s.past) + ' evento(s)' +
+                   (s.past ? ' · atraso máx ' + nDec(s.lateMaxMs, 1) + ' ms' : '') +
+                   ' em ' + nInt(s.events) + ' agendados',
+           s.past ? 'bad' : 'good');
+      dset('drop', nInt(s.dropped) + ' evento(s) perdido(s)' +
+                   (s.dropVoice ? ' · ' + nInt(s.dropVoice) + ' voz(es) sem orçamento' : ''),
+           (s.dropped || s.dropVoice) ? 'bad' : 'good');
+      dset('voices', nInt(s.voices) + ' soando · pico ' + nInt(s.peakVoices) +
+                     ' · ' + nInt(s.activeNodes) + ' nós ativos · ' + nInt(s.liveNodes) + ' vivos');
+      dset('restarts', nInt(s.stopAll || 0) + ' stopAll · rearm ' + nInt(s.rearm || 0) +
+                       (s.dspGuard ? ' · PROTEÇÃO DSP ATIVA (' + (s.dspGuardReason || '?') + ')' : '') +
+                       (s.stopReasons ? ' · ' + JSON.stringify(s.stopReasons) : ''),
+           s.dspGuard ? 'warn' : ((s.rearm || (s.stopReasons && s.stopReasons.reanchor)) ? 'warn' : 'dim'));
+      dshow('past', true); dshow('drop', true); dshow('voices', true); dshow('restarts', true);
+    } else {
+      dshow('past', false); dshow('drop', false); dshow('voices', false); dshow('restarts', false);
+    }
+
+    if (c) {
+      var gapBad = c.maxGapMs > c.lookaheadEff * 1000;
+      dset('gap', nDec(c.maxGapMs, 1) + ' ms entre ticks · ' + nInt(c.ticks) + ' ticks' +
+                  (c.hidden ? ' · ABA ESCONDIDA' : ''),
+           gapBad ? 'bad' : (c.maxGapMs > 120 ? 'warn' : 'good'));
+      dset('look', nDec(c.lookahead * 1000, 0) + ' ms base · ' +
+                   nDec(c.lookaheadEff * 1000, 0) + ' ms efetivo' +
+                   (c.boost > 0 ? ' (+' + nDec(c.boost * 1000, 0) + ' aprendido)' : ''));
+      dset('skip', nDec(c.skippedSec, 3) + ' s de música nunca pedida · ' +
+                   nInt(c.skips) + ' janela(s)',
+           c.skippedSec > 0 ? 'bad' : 'good');
+      dshow('gap', true); dshow('look', true); dshow('skip', true);
+    } else {
+      dshow('gap', false); dshow('look', false); dshow('skip', false);
+    }
+
+    /* ---------------- sistema ---------------- */
+    if (d.mem) {
+      var used = d.mem.usedJSHeapSize, tot = d.mem.totalJSHeapSize, lim = d.mem.jsHeapSizeLimit;
+      dset('jsmem', nMB(used) + ' em uso · ' + nMB(tot) + ' reservados · limite ' + nMB(lim),
+           (lim > 0 && used / lim > 0.85) ? 'warn' : '');
+      dshow('jsmem', true);
+    } else {
+      dshow('jsmem', false);
+    }
+
+    var mach = [];
+    try { if (navigator.hardwareConcurrency) mach.push(navigator.hardwareConcurrency + ' núcleos'); } catch (e1) { /* ok */ }
+    try { if (navigator.deviceMemory) mach.push(navigator.deviceMemory + ' GB de RAM'); } catch (e2) { /* ok */ }
+    try {
+      if (window.screen && screen.width) mach.push('tela ' + screen.width + '×' + screen.height);
+    } catch (e3) { /* ok */ }
+    dset('machine', mach.length ? mach.join(' · ') : '—', 'dim');
+
+    /* ---------------- rodape ---------------- */
+    var note;
+    if (e && e.software) {
+      note = 'Enquanto estiver em <b>software</b>, nenhum ajuste de qualidade resolve: ' +
+             'o gargalo é a CPU desenhando a tela.';
+    } else {
+      note = 'GPU em <b>0%</b> no Gerenciador de Tarefas não prova nada: ele mostra ' +
+             '<b>Copy</b>/<b>Video</b> por padrão. Clique no nome de um gráfico e troque ' +
+             'para <b>3D</b> — é lá que um jogo aparece.';
+    }
+    note += ' &nbsp;·&nbsp; <b>F3</b> fecha · <b>C</b> copia o relatório.';
+    if (dg.cache.note !== note) { dg.cache.note = note; dg.N.note.innerHTML = note; }
+  }
+
+  /* Pintura com trava de cadencia: as duas fontes de tick (o updater do engine
+     e o intervalo de 250 ms) passam por aqui, e nenhuma combinacao delas
+     consegue pintar mais de 4x por segundo. */
+  function diagRefresh(force) {
+    if (!dg.on || !dg.built) return;
+    var t = nowMs();
+    if (!force && (t - dg.lastMs) < DIAG_MIN_MS) return;
+    dg.lastMs = t;
+    try { diagPaint(); } catch (e) { /* diagnostico nunca derruba o jogo */ }
+  }
+
+  /* Updater do engine: existe SO enquanto o painel esta aberto. Serve o modo
+     captura (onde o tempo e simulado em bloco e um setInterval nao seria
+     confiavel) e garante que o ultimo frame renderizado tenha numeros frescos. */
+  function diagTick(dt) {
+    if (!dg.on) return;
+    dg.acc += dt;
+    if (dg.acc < DIAG_PERIOD) return;
+    dg.acc = 0;
+    diagRefresh(false);
+  }
+
+  /* ---- copiar para a area de transferencia -------------------------------- */
+
+  function diagReport() {
+    var d = diagRead();
+    var e = d.eng, s = d.syn, c = d.sch;
+    var L = [];
+    function line(k, v) { L.push(k + ': ' + v); }
+
+    L.push('=== GUITARRADA HERO — RELATÓRIO DE DIAGNÓSTICO ===');
+    try { line('gerado em', new Date().toLocaleString('pt-BR')); } catch (e0) { /* ok */ }
+    L.push('');
+
+    L.push('--- IMAGEM ---');
+    if (e) {
+      line('fps', nDec(e.fps, 1) + ' (média ' + nDec(e.fpsAvg, 1) +
+                  ', mínimo dos últimos ' + e.windowSec + ' s: ' + nDec(e.fpsMin10, 1) + ')');
+      line('pior frame (10 s)', nInt(e.worstMs10) + ' ms');
+      line('engasgos (>90 ms)', nInt(e.hitches) + ', pior de todos ' + nInt(e.worstMsTotal) + ' ms');
+      line('GL_RENDERER', e.glRenderer || '(não informado)');
+      line('GL_VENDOR', e.glVendor || '(não informado)');
+      line('GL_RENDERER mascarado', e.glMaskedRenderer || '(não informado)');
+      line('nome sem máscara', e.glUnmasked ? 'sim (WEBGL_debug_renderer_info)' : 'NÃO — extensão indisponível');
+      line('classificação', e.software ? '*** RENDER POR SOFTWARE (CPU) ***' : e.gpuKind);
+      line('WebGL', e.webgl2 ? '2' : '1');
+      line('GL_VERSION', e.glVersion || '—');
+      line('textura máx / anisotropia', e.maxTextureSize + ' / ' + e.maxAnisotropy + 'x');
+      line('resolução', e.cssWidth + 'x' + e.cssHeight + ' css, ' +
+                        e.bufferWidth + 'x' + e.bufferHeight + ' buffer');
+      line('pixelRatio', nDec(e.pixelRatio, 3) + ' (devicePixelRatio ' + nDec(e.devicePixelRatio, 3) + ')');
+      line('qualidade', e.quality + ' (pedida: ' + e.requestedQuality + ')' +
+                        (e.degraded ? ' — AUTO-DEGRADOU' : '') +
+                        ', quedas automáticas: ' + e.autoDowngrades +
+                        ', auto ' + (e.autoQuality ? 'ligada' : 'desligada'));
+      line('anti-serrilhado', e.aa + (e.composer ? '' : ' (composer DESLIGADO)'));
+      line('sombras', e.shadowHz + ' Hz');
+      line('aquecimento', (e.warmedUp ? 'feito em ' + nInt(e.warmupMs) + ' ms' : 'ainda não'));
+      line('frame', nInt(e.frame) + (e.running ? ' (rodando)' : ' (parado)'));
+      line('desenho', nInt(e.calls) + ' chamadas, ' + nInt(e.triangles) + ' triângulos, ' +
+                      nInt(e.lines) + ' linhas, ' + nInt(e.points) + ' pontos');
+      line('memória GL', nInt(e.geometries) + ' geometrias, ' + nInt(e.textures) +
+                         ' texturas, ' + nInt(e.programs) + ' programas');
+      line('contexto WebGL', (e.contextLost ? 'PERDIDO AGORA' : 'ok') +
+                             ', perdas: ' + e.contextLostCount +
+                             ', restaurações: ' + e.contextRestoredCount);
+    } else {
+      L.push('(GH.Engine.diag indisponível)');
+    }
+
+    L.push('');
+    L.push('--- ÁUDIO ---');
+    line('relógio do áudio', d.cap ? 'modo captura (sem áudio)' : (d.stalled ? 'PARADO (jogo no relógio de parede)' : 'ok'));
+    try {
+      if (GH.Conductor) {
+        line('audioStalled', String(!!GH.Conductor.audioStalled));
+        line('paradas do relógio', String(GH.Conductor.audioStallCount || 0));
+        line('tocando', String(!!GH.Conductor.isPlaying));
+      }
+    } catch (e4) { /* ok */ }
+    if (s) {
+      line('eventos agendados', nInt(s.events) + ' em ' + nInt(s.windows) + ' janelas');
+      line('AGENDADOS NO PASSADO', nInt(s.past) + ' (empurrados: ' + nInt(s.nudged) +
+                                   ', atraso máx ' + nDec(s.lateMaxMs, 1) + ' ms, médio ' +
+                                   nDec(s.lateMeanMs, 1) + ' ms)');
+      line('DESCARTADOS', nInt(s.dropped));
+      line('vozes roubadas / sem orçamento', nInt(s.stolen) + ' / ' + nInt(s.dropVoice));
+      line('vozes', nInt(s.voices) + ' agora, pico ' + nInt(s.peakVoices));
+      line('nós de áudio', nInt(s.activeNodes) + ' ativos, ' + nInt(s.liveNodes) +
+                           ' vivos, pico ' + nInt(s.peakLive));
+      line('eventos na fila', nInt(s.scheduled) + ', maior rajada ' + nInt(s.burstMax));
+      line('camadas Star Power armadas', nInt(s.spArmed || 0));
+      line('stopAll / rearm', nInt(s.stopAll || 0) + ' / ' + nInt(s.rearm || 0));
+      line('motivos de stopAll', s.stopReasons ? JSON.stringify(s.stopReasons) : '{}');
+      line('proteção DSP', s.dspGuard ? 'ATIVA — ' + (s.dspGuardReason || '?') : 'inativa');
+    } else {
+      L.push('(GH.Synth.diag indisponível)');
+    }
+    if (c) {
+      line('ticks do agendador', nInt(c.ticks) + ' (fontes: ' + JSON.stringify(c.src) + ')');
+      line('MAIOR VÃO ENTRE TICKS', nDec(c.maxGapMs, 1) + ' ms (intervalo alvo ' + c.tickMs + ' ms)');
+      line('lookahead', nDec(c.lookahead, 3) + ' s base, ' + nDec(c.lookaheadEff, 3) +
+                        ' s efetivo, folga aprendida ' + nDec(c.boost, 3) + ' s');
+      line('janelas puladas', nInt(c.skips) + ' (' + nDec(c.skippedSec, 3) + ' s de música)');
+      line('aba escondida', String(!!c.hidden));
+    } else {
+      L.push('(GH.Conductor.schedDiag indisponível)');
+    }
+
+    L.push('');
+    L.push('--- GRAVADOR DE VOO (mais antigo -> mais novo) ---');
+    if (d.flight && d.flight.length) {
+      for (var fi = 0; fi < d.flight.length; fi++) {
+        try { L.push(JSON.stringify(d.flight[fi])); } catch (eFlight) { /* segue */ }
+      }
+    } else {
+      L.push('(ainda sem amostras)');
+    }
+
+    L.push('');
+    L.push('--- SISTEMA ---');
+    if (d.mem) {
+      line('memória JS', nMB(d.mem.usedJSHeapSize) + ' em uso, ' +
+                         nMB(d.mem.totalJSHeapSize) + ' reservados, limite ' +
+                         nMB(d.mem.jsHeapSizeLimit));
+    } else {
+      line('memória JS', '(performance.memory indisponível neste navegador)');
+    }
+    try { line('núcleos', String(navigator.hardwareConcurrency || '—')); } catch (e5) { /* ok */ }
+    try { line('RAM informada', navigator.deviceMemory ? navigator.deviceMemory + ' GB' : '—'); } catch (e6) { /* ok */ }
+    try { line('tela', screen.width + 'x' + screen.height + ' @ ' + nDec(window.devicePixelRatio || 1, 2)); } catch (e7) { /* ok */ }
+    try { line('janela', window.innerWidth + 'x' + window.innerHeight); } catch (e8) { /* ok */ }
+    try { line('origem', String(location.protocol)); } catch (e9) { /* ok */ }
+    try { line('navegador', String(navigator.userAgent)); } catch (e10) { /* ok */ }
+
+    L.push('');
+    L.push('--- CONFIGURAÇÃO DO JOGO ---');
+    try {
+      var S = GH.Settings;
+      if (S) {
+        line('qualidade escolhida', String(S.quality));
+        line('plateia 3D', S.crowd3D === false ? 'DESLIGADA' : 'ligada');
+        line('velocidade da pista', String(S.scrollSpeed));
+        line('offsets (áudio/vídeo)', S.audioOffsetMs + ' ms / ' + S.videoOffsetMs + ' ms');
+        line('calibrado', String(!!S.calibrated));
+      }
+    } catch (e11) { /* ok */ }
+    try {
+      if (GH.Game && GH.Game.state) {
+        line('estado do jogo', String(GH.Game.state) +
+             (GH.Game.song ? ' · ' + GH.Game.song.id : '') +
+             (GH.Game.difficulty ? ' · ' + GH.Game.difficulty : ''));
+      }
+    } catch (e12) { /* ok */ }
+    if (e && e.software) {
+      L.push('');
+      L.push('*** ATENÇÃO: RENDERIZAÇÃO POR SOFTWARE ***');
+      L.push('A GPU não está sendo usada. Ligue a aceleração por hardware no');
+      L.push('navegador e, no Windows, Configurações > Sistema > Vídeo >');
+      L.push('Configurações gráficas > escolher o navegador > Alto desempenho.');
+    }
+    return L.join('\n');
+  }
+
+  /* Aviso curto no cabecalho. setTimeout so nasce depois de um clique/tecla
+     do jogador — nunca no laco. */
+  function diagToast(txt) {
+    if (!dg.N.toast) return;
+    dg.N.toast.textContent = txt;
+    if (dg.toastTimer) { clearTimeout(dg.toastTimer); dg.toastTimer = 0; }
+    dg.toastTimer = setTimeout(function () {
+      dg.toastTimer = 0;
+      try { if (dg.N.toast) dg.N.toast.textContent = ''; } catch (e) { /* ok */ }
+    }, 2600);
+  }
+
+  /* Plano B universal: em file:// (e sem HTTPS) navigator.clipboard costuma
+     nem existir. O textarea escondido + execCommand('copy') ainda funciona em
+     todo navegador que nos interessa, desde que dentro do gesto do usuario. */
+  function diagCopyLegacy(txt) {
+    var ta = null, ok = false;
+    try {
+      ta = document.createElement('textarea');
+      ta.value = txt;
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.cssText = 'position:fixed;top:0;left:-10000px;width:1px;height:1px;opacity:0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { ta.setSelectionRange(0, txt.length); } catch (e1) { /* ok */ }
+      ok = !!document.execCommand('copy');
+    } catch (e) { ok = false; }
+    try { if (ta && ta.parentNode) ta.parentNode.removeChild(ta); } catch (e2) { /* ok */ }
+    try { if (window.focus) window.focus(); } catch (e3) { /* ok */ }
+    return ok;
+  }
+
+  function diagCopy() {
+    var txt;
+    try { txt = diagReport(); } catch (e) { diagToast('erro ao montar'); return; }
+    var done = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        done = true;
+        navigator.clipboard.writeText(txt).then(
+          function () { diagToast('COPIADO!'); },
+          function () { diagToast(diagCopyLegacy(txt) ? 'COPIADO!' : 'não deu — tire uma foto'); }
+        );
+      }
+    } catch (e2) { done = false; }
+    if (!done) diagToast(diagCopyLegacy(txt) ? 'COPIADO!' : 'não deu — tire uma foto');
+  }
+
+  /* ---- liga / desliga ------------------------------------------------------ */
+
+  function diagApply(on) {
+    on = !!on;
+    if (on === dg.on && dg.built) return;
+    dg.on = on;
+    if (on) {
+      diagBuild();
+      dg.soft = null;                 /* forca reavaliacao do alerta */
+      dg.root.className = 'on';
+      dg.acc = 0; dg.lastMs = -1e9;
+      diagRefresh(true);
+      if (!dg.updaterOn) {
+        try {
+          if (GH.Engine && typeof GH.Engine.addUpdater === 'function') {
+            GH.Engine.addUpdater(diagTick);
+            dg.updaterOn = true;
+          }
+        } catch (e) { /* o intervalo abaixo ja cobre */ }
+      }
+      /* segunda fonte de tick: cobre o jogo pausado/congelado, quando o
+         updater do engine nao roda. A trava de cadencia mantem os 4 Hz. */
+      if (!dg.timer) dg.timer = setInterval(function () { diagRefresh(false); }, 250);
+    } else {
+      if (dg.timer) { clearInterval(dg.timer); dg.timer = 0; }
+      if (dg.updaterOn) {
+        try { if (GH.Engine && GH.Engine.removeUpdater) GH.Engine.removeUpdater(diagTick); } catch (e2) { /* ok */ }
+        dg.updaterOn = false;
+      }
+      if (dg.root) dg.root.className = '';
+    }
+  }
+
+  function diagToggle() {
+    var on = !dg.on;
+    /* A tecla e a chave da configuracao sao a MESMA coisa: quem liga por F3
+       encontra "Mostrar FPS" ligado nas opcoes, e vice-versa. Escrevemos o
+       campo direto (sem GH.Settings.set) de proposito — `set` dispara
+       settingsApply(), que reconstroi o pos-processamento pela qualidade, e
+       isso e um engasgo gratuito no meio da musica. */
+    try {
+      if (GH.Settings) {
+        GH.Settings.showFPS = on;
+        if (typeof GH.Settings.save === 'function') GH.Settings.save();
+      }
+    } catch (e) { /* sem localStorage tambem serve */ }
+    diagApply(on);
+    return on;
+  }
+
+  function diagHook() {
+    if (dg.hooked) return;
+    dg.hooked = true;
+
+    /* Teclado. Fase de bolha (nao captura): quem esta remapeando tecla nos
+       menus ve o evento primeiro. */
+    try {
+      window.addEventListener('keydown', function (ev) {
+        var code = ev.code || '';
+        if (code !== 'F3' && code !== 'KeyC') return;
+        var ae = document.activeElement;
+        if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+        if (code === 'F3') {
+          if (ev.ctrlKey || ev.altKey || ev.metaKey) return;
+          ev.preventDefault();
+          diagToggle();
+        } else if (dg.on && !ev.ctrlKey && !ev.altKey && !ev.metaKey && !ev.repeat) {
+          /* C copia — so com o painel aberto, e sem preventDefault: se alguem
+             remapeou um traste para C, a nota continua valendo. */
+          diagCopy();
+        }
+      }, false);
+    } catch (e) { /* sem teclado, resta a chave de configuracao */ }
+
+    /* A chave "Mostrar FPS" das opcoes liga o mesmo painel. */
+    try {
+      if (GH.Settings && typeof GH.Settings.onChange === 'function') {
+        GH.Settings.onChange(function (S, key) {
+          if (!key || key === 'showFPS') diagApply(!!S.showFPS);
+        });
+      }
+    } catch (e2) { /* ok */ }
+
+    /* Estado inicial: a preferencia salva, ou `?diag=1` na URL (e como o
+       modo captura fotografa o painel para conferencia). */
+    var want = false;
+    try { want = !!(GH.Settings && GH.Settings.showFPS); } catch (e3) { want = false; }
+    try {
+      if (/[?&]diag=1(&|$)/.test(String(window.location.search || ''))) want = true;
+    } catch (e4) { /* ok */ }
+    if (want) diagApply(true);
+  }
+
   GH.HUD = {
     init: init,
     update: update,
@@ -1745,7 +2481,19 @@
     debug: debug,
     ready: false,
     root: null,
-    selfDriven: false        /* quem chama update() e o GH.Game */
+    selfDriven: false,       /* quem chama update() e o GH.Game */
+
+    /* Overlay de diagnostico (secao 13). Publico para o menu de opcoes, para
+       as ferramentas e para quem estiver ajudando o jogador por telefone. */
+    diag: {
+      show: function () { diagApply(true); },
+      hide: function () { diagApply(false); },
+      toggle: diagToggle,
+      refresh: function () { diagRefresh(true); },
+      report: diagReport,
+      copy: diagCopy,
+      get visible() { return dg.on; }
+    }
   };
 
 })(window.GH = window.GH || {});

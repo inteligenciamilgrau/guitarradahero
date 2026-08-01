@@ -1,0 +1,164 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GH Stem Generator</title>
+<pre id="out">iniciando...</pre>
+<script src="../src/core/util.js"></script>
+<script src="../src/audio/synth.js"></script>
+<script src="../src/content/songs.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var SR = 48000;
+  var QUANTUM = 128;
+  var PRE = 0.10;
+  var TAIL = 2.0;
+  var AHEAD = 1.0;
+  var SWEEP = 0.50;
+  var out = document.getElementById('out');
+  var holdFrame = null;
+
+  function line(s) {
+    out.textContent += '\n' + s;
+    document.title = String(s).slice(0, 120);
+  }
+  function align(sec) { return Math.ceil(sec * SR / QUANTUM) * QUANTUM / SR; }
+
+  /* --dump-dom espera pelo load. O iframe aberto segura esse evento sem
+     gastar CPU enquanto OfflineAudioContext renderiza. */
+  function hold() {
+    var f = document.createElement('iframe');
+    f.style.display = 'none';
+    document.body.appendChild(f);
+    var d = f.contentDocument;
+    d.open();
+    d.write('<title>rendering</title>');
+    holdFrame = f;
+  }
+  function release() {
+    try { if (holdFrame && holdFrame.contentDocument) holdFrame.contentDocument.close(); } catch (e) {}
+    holdFrame = null;
+  }
+  hold();
+  setTimeout(release, 30 * 60 * 1000);
+
+  function query(name, fallback) {
+    var m = new RegExp('(?:^|[?&])' + name + '=([^&]*)').exec(location.search);
+    return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : fallback;
+  }
+  function songById(id) {
+    for (var i = 0; i < GH.Songs.length; i++) if (GH.Songs[i].id === id) return GH.Songs[i];
+    return null;
+  }
+  function accepts(stem, e) {
+    if (stem === 'guitar') return e.i === 'guitar';
+    if (stem === 'backing') return e.i === 'bass' || e.i === 'organ' || e.i === 'brass' || e.i === 'pluck';
+    return e.i !== 'guitar' && e.i !== 'bass' && e.i !== 'organ' && e.i !== 'brass' && e.i !== 'pluck';
+  }
+
+  function writeText(v, off, view) {
+    for (var i = 0; i < v.length; i++) view.setUint8(off + i, v.charCodeAt(i));
+  }
+  function wav16(buffer, firstFrame, frames) {
+    var bytes = 44 + frames * 4;
+    var ab = new ArrayBuffer(bytes);
+    var v = new DataView(ab);
+    writeText('RIFF', 0, v); v.setUint32(4, bytes - 8, true);
+    writeText('WAVE', 8, v); writeText('fmt ', 12, v);
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 2, true); v.setUint32(24, SR, true);
+    v.setUint32(28, SR * 4, true); v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+    writeText('data', 36, v); v.setUint32(40, frames * 4, true);
+
+    var L = buffer.getChannelData(0);
+    var R = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : L;
+    var p = 44, peak = 0, clipped = 0;
+    for (var i = 0; i < frames; i++) {
+      var l = L[firstFrame + i] || 0;
+      var r = R[firstFrame + i] || 0;
+      var al = Math.abs(l), ar = Math.abs(r);
+      if (al > peak) peak = al; if (ar > peak) peak = ar;
+      if (al > 1) clipped++; if (ar > 1) clipped++;
+      l = Math.max(-1, Math.min(1, l)); r = Math.max(-1, Math.min(1, r));
+      v.setInt16(p, l < 0 ? l * 32768 : l * 32767, true); p += 2;
+      v.setInt16(p, r < 0 ? r * 32768 : r * 32767, true); p += 2;
+    }
+    return { blob: new Blob([ab], { type: 'audio/wav' }), peak: peak, clipped: clipped };
+  }
+
+  function fail(e) {
+    out.textContent = 'STEM_ERROR\n' + String(e && e.stack ? e.stack : e);
+    document.title = 'STEM_ERROR';
+    release();
+  }
+
+  try {
+    var songId = query('song', 'frevo-de-aco');
+    var stem = query('stem', 'backing');
+    var downloadName = query('file', stem + '.wav').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    var song = songById(songId);
+    if (!song) throw new Error('musica desconhecida: ' + songId);
+    if (['backing', 'drums', 'guitar'].indexOf(stem) < 0) throw new Error('stem desconhecido: ' + stem);
+
+    out.textContent = 'musica=' + song.id + '\nstem=' + stem + '\nmontando arranjo...';
+    var plan = GH.Synth.prepare(song);
+    var events = plan.events.filter(function (e) { return accepts(stem, e); });
+    var seconds = align(Math.max(song.durationSec + TAIL,
+      events.length ? events[events.length - 1].t + events[events.length - 1].d + TAIL : 1));
+    var total = align(PRE + seconds);
+    var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OAC) throw new Error('OfflineAudioContext indisponivel');
+    var oc = new OAC(2, Math.round(total * SR), SR);
+
+    var buses = { music: oc.createGain(), guitar: oc.createGain(), drums: oc.createGain() };
+    if (stem === 'guitar') buses.guitar.connect(oc.destination);
+    if (stem === 'backing') buses.music.connect(oc.destination);
+    if (stem === 'drums') {
+      /* O retorno de sala interno da bateria sai pelo bus music. */
+      buses.drums.connect(oc.destination);
+      buses.music.connect(oc.destination);
+    }
+    var fakeAudio = { ctx: oc, buses: buses, setSend: function () {} };
+    GH.Synth.init(fakeAudio);
+    if (!GH.Synth.ready) throw new Error('grafo do sintetizador nao montou');
+
+    var cursor = 0, scheduled = 0;
+    function enqueue(until) {
+      while (cursor < events.length && PRE + events[cursor].t < until) {
+        var e = events[cursor++];
+        GH.Synth.noteOn(e.i, e.m, e.v, e.d, e.a, PRE + e.t);
+        scheduled++;
+      }
+    }
+    enqueue(AHEAD);
+
+    for (var t = align(SWEEP); t < total - QUANTUM / SR; t = align(t + SWEEP)) {
+      (function (at) {
+        oc.suspend(at).then(function () {
+          try { GH.Synth.bench.sweep(); } catch (e) {}
+          enqueue(at + AHEAD);
+          oc.resume();
+        });
+      })(t);
+    }
+
+    line('eventos=' + events.length + ' duracao=' + seconds.toFixed(3) + 's');
+    var wall0 = performance.now();
+    oc.startRendering().then(function (buffer) {
+      line('render=' + ((performance.now() - wall0) / 1000).toFixed(1) + 's; codificando WAV...');
+      var first = Math.round(PRE * SR);
+      var frames = Math.min(Math.round(seconds * SR), buffer.length - first);
+      var w = wav16(buffer, first, frames);
+      var a = document.createElement('a');
+      a.download = downloadName;
+      a.href = URL.createObjectURL(w.blob);
+      document.body.appendChild(a);
+      a.click();
+      line('STEM_OK bytes=' + w.blob.size + ' peak=' + w.peak.toFixed(5) + ' clipped=' + w.clipped + ' scheduled=' + scheduled);
+      /* Da tempo para o navegador terminar de gravar o Blob antes de o
+         --dump-dom encerrar o processo headless. */
+      setTimeout(function () { URL.revokeObjectURL(a.href); release(); }, 10000);
+    }, fail);
+  } catch (e) { fail(e); }
+})();
+</script>

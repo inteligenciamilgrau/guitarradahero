@@ -446,17 +446,155 @@
      na contagem de particulas que os outros modulos leem.
      ======================================================================= */
 
+  /* `shadowHz` = quantas vezes por segundo o mapa de sombra e refeito. Quem
+     projeta sombra aqui e a ferragem parada da linha de acerto; 60 Hz era
+     desperdicio puro (ver secao 14.2). */
   var QUALITY_TIERS = {
+    /* ---------------------------------------------------------------------
+       MODO DE SOBREVIVENCIA POR SOFTWARE (abaixo de 'low').
+
+       Escolhido sozinho quando o WebGL esta rodando por SOFTWARE (SwiftShader
+       / llvmpipe / WARP), ou seja: quando a "GPU" e a mesma CPU que serve o
+       agendador de audio. Ali cada pixel do pos-processamento e um laco de
+       fragmento executado na thread do processo de GPU do Chromium, roubando
+       nucleos do processo da aba — e um jogo de ritmo prefere ficar feio a
+       ficar fora do compasso.
+
+       O que muda em relacao ao 'low', e por que:
+         - pixelRatio com TETO em 1 e escala 0.60 -> ~36% dos fragmentos;
+         - bloom DESLIGADO (bloomEnabled:false). O UnrealBloomPass sozinho e
+           uma piramide de 5 niveis: 1 limiar + 5 borroes horizontais + 5
+           verticais + 1 composicao. Por passe medido, e o item mais caro da
+           cadeia (secao 8.1);
+         - antialiasing NENHUM ('off'): o SMAA sao TRES passadas de tela cheia;
+         - sombras desligadas e mapa minusculo (o programa GLSL sem
+           USE_SHADOWMAP ja foi pre-compilado no aquecimento);
+         - grade em modo `gradeLite`: 3 amostras de aberracao, sem halo
+           hexagonal (6 amostras), sem grao e sem scanline. A passada CONTINUA
+           existindo porque e ela quem converte linear->sRGB (secao 1): sem
+           ela a imagem sai lavada e as raias perdem separacao;
+         - render target em BYTE em vez de meio-float (chooseRTType);
+         - particulas e publico no minimo que os subsistemas aceitam.
+       --------------------------------------------------------------------- */
+    software: { renderScale: 0.60, pixelRatioMax: 1.0, shadows: false, shadowMapSize: 512,
+             bloomScale: 0.18, bloomEnabled: false, gradeLite: true, aa: 'off', msaa: 0,
+             particles: 0.12, crowd: 0.10, detail: 0.0, reflections: false, texScale: 0.35, maxLights: 3,  anisotropy: 1,  shadowHz: 4 },
     low:   { renderScale: 0.70, shadows: false, shadowMapSize:  512, bloomScale: 0.30, aa: 'fxaa', msaa: 0,
-             particles: 0.35, crowd: 0.30, detail: 0.0, reflections: false, texScale: 0.50, maxLights: 4,  anisotropy: 1 },
+             particles: 0.35, crowd: 0.30, detail: 0.0, reflections: false, texScale: 0.50, maxLights: 4,  anisotropy: 1,  shadowHz: 8 },
     med:   { renderScale: 0.85, shadows: true,  shadowMapSize: 1024, bloomScale: 0.45, aa: 'fxaa', msaa: 0,
-             particles: 0.65, crowd: 0.60, detail: 0.0, reflections: false, texScale: 0.75, maxLights: 6,  anisotropy: 4 },
+             particles: 0.65, crowd: 0.60, detail: 0.0, reflections: false, texScale: 0.75, maxLights: 6,  anisotropy: 4,  shadowHz: 12 },
     high:  { renderScale: 1.00, shadows: true,  shadowMapSize: 2048, bloomScale: 0.60, aa: 'smaa', msaa: 0,
-             particles: 1.00, crowd: 1.00, detail: 1.0, reflections: true,  texScale: 1.00, maxLights: 8,  anisotropy: 8 },
+             particles: 1.00, crowd: 1.00, detail: 1.0, reflections: true,  texScale: 1.00, maxLights: 8,  anisotropy: 8,  shadowHz: 20 },
     ultra: { renderScale: 1.00, shadows: true,  shadowMapSize: 4096, bloomScale: 0.80, aa: 'smaa', msaa: 4,
-             particles: 1.35, crowd: 1.35, detail: 1.0, reflections: true,  texScale: 1.00, maxLights: 10, anisotropy: 16 }
+             particles: 1.35, crowd: 1.35, detail: 1.0, reflections: true,  texScale: 1.00, maxLights: 10, anisotropy: 16, shadowHz: 30 }
   };
-  var QUALITY_ORDER = ['low', 'med', 'high', 'ultra'];
+  var QUALITY_ORDER = ['software', 'low', 'med', 'high', 'ultra'];
+
+  /* INDICE PUBLICO — nao e o indice em QUALITY_ORDER, de proposito.
+     GH.Stage le `qualityScale.index` para decidir a cadencia da plateia com a
+     regra "idx>=2 anima tudo". Se o indice publico andasse junto com a
+     insercao do nivel 'software', TODA essa regra escorregaria um degrau em
+     modulos que nao sao meus. Entao o indice publico continua sendo o de
+     sempre (low=0 ... ultra=3) e o modo de software fica em -1: mais baixo
+     que tudo, exatamente como deve ser lido por quem consome a tabela. */
+  var QUALITY_PUBLIC_INDEX = { software: -1, low: 0, med: 1, high: 2, ultra: 3 };
+
+  /* Nome apresentado a subsistemas que so conhecem os quatro niveis
+     historicos. 'software' se apresenta como 'low' para eles; quem quiser o
+     nome de verdade le `GH.Engine.qualityScale.name` ou `GH.Engine.quality`. */
+  function legacyQualityName(key) { return (key === 'software') ? 'low' : key; }
+
+  /* =======================================================================
+     3.1 O ORACULO: `failIfMajorPerformanceCaveat`
+     (a leitura do NOME do adaptador fica na secao 4.1, em readGpuInfo)
+
+     Sao tres mecanismos independentes decidindo "estamos na GPU certa?":
+
+       1. `powerPreference:'high-performance'` na criacao do renderer. Nao e
+          enfeite: em maquina hibrida (Optimus / AMD switchable / desktop com
+          iGPU + dedicada) e este atributo que faz o navegador pedir ao driver
+          o adaptador de alto desempenho. Sem ele o Chromium fica na integrada.
+
+       2. `failIfMajorPerformanceCaveat: true` NUMA SONDAGEM SEPARADA — esta
+          funcao. No renderer de verdade a flag e PROIBIDA: numa maquina sem
+          GPU ela faria o contexto nao nascer e o jogo ficaria com tela preta,
+          que o contrato veta. Mas num contexto descartavel de 2x2 pixels ela
+          e um oraculo honesto: se o navegador so tem rasterizador por
+          software, a criacao falha e sabemos disso ANTES de montar a cadeia
+          de pos-processamento.
+
+       3. `WEBGL_debug_renderer_info` no contexto real (secao 4.1).
+
+     Devolve true (so ha software), false (ha aceleracao) ou null (nao deu
+     para saber). Cria e destroi um contexto proprio; nunca toca no do jogo.
+     ======================================================================= */
+
+  var caveatCache;   /* undefined = ainda nao sondado */
+
+  /* ---- TRAVA DE RESSONDAGEM ------------------------------------------------
+     Cada sondagem cria um contexto WebGL de verdade. O navegador so mantem uns
+     ~16 vivos por pagina e, ao passar do teto, ele MATA O MAIS ANTIGO — que e
+     justamente o contexto do jogo. Ou seja: uma sondagem em laco nao "detecta"
+     perda de contexto, ela PROVOCA perda de contexto, e o jogo cairia sozinho
+     no modo de sobrevivencia acusando um problema que a propria sondagem
+     criou. O risco e concreto porque `refreshGpuInfo(true)` e
+     `probeHardwareAcceleration()` sao publicos e o overlay de diagnostico (F3)
+     e atualizado varias vezes por segundo.
+
+     `loseContext()` devolve o slot na hora, mas nao e sincrono em todo
+     navegador — entao a trava aqui e por TEMPO e por CONTAGEM, e nao depende
+     da boa vontade de quem chama. Uma releitura legitima (restauracao de
+     contexto, jogador abrindo o painel) passa; um laco de 60 Hz nao. */
+  var CAVEAT_MIN_GAP_MS = 5000;   /* intervalo minimo entre duas sondagens */
+  var CAVEAT_MAX_PROBES = 16;     /* teto absoluto na vida da pagina */
+  var caveatLastMs = -Infinity;
+  var caveatProbes = 0;
+
+  function caveatOnce(refresh) {
+    var first = (caveatCache === undefined);
+    if (!first && refresh !== true) return caveatCache;
+
+    if (!first) {
+      /* a primeira sondagem sempre acontece; as REssondagens sao racionadas */
+      var nowMs = (window.performance && performance.now) ? performance.now() : Date.now();
+      if (caveatProbes >= CAVEAT_MAX_PROBES || (nowMs - caveatLastMs) < CAVEAT_MIN_GAP_MS) {
+        return caveatCache;      /* devolve o que ja sabemos, sem gastar slot */
+      }
+      caveatLastMs = nowMs;
+    } else {
+      caveatLastMs = (window.performance && performance.now) ? performance.now() : Date.now();
+    }
+
+    caveatProbes++;
+    caveatCache = probeCaveat();
+    return caveatCache;
+  }
+
+  function probeCaveat() {
+    var cv = null, gl = null;
+    try {
+      cv = document.createElement('canvas');
+      cv.width = 2; cv.height = 2;
+      var attrs = {
+        failIfMajorPerformanceCaveat: true,
+        powerPreference: 'high-performance',
+        antialias: false, depth: false, stencil: false, alpha: false
+      };
+      gl = cv.getContext('webgl2', attrs) || cv.getContext('webgl', attrs) ||
+           cv.getContext('experimental-webgl', attrs);
+      if (!gl) return true;   /* sem contexto acelerado -> so sobra software */
+      /* devolve o contexto na hora: nao queremos gastar um dos ~16 slots */
+      try {
+        var lose = gl.getExtension('WEBGL_lose_context');
+        if (lose) lose.loseContext();
+      } catch (e2) { /* ok */ }
+      return false;
+    } catch (e) {
+      return null;            /* navegador estranho: nao afirmamos nada */
+    } finally {
+      cv = null; gl = null;
+    }
+  }
 
   /* =======================================================================
      4. ESTADO PRIVADO
@@ -490,7 +628,12 @@
     /* passes */
     renderTarget: null,
     msaaSamples: 0,
+    rtTypeUsed: null,    /* tipo do render target em uso (byte x meio-float) */
     smaaReady: false,
+
+    /* modo de sobrevivencia por software: quando ligado, a auto-qualidade
+       nunca sobe acima de 'software' por conta propria */
+    softwareLock: false,
 
     /* qualidade */
     quality: 'high',
@@ -529,8 +672,191 @@
     updaterErrors: null,
 
     /* integracao opcional com o Conductor (kick no beat) */
-    beatHooked: false
+    beatHooked: false,
+
+    /* --- AQUECIMENTO (ver secao 14.1) --- */
+    warmedUp: false,
+    warmupMs: 0,
+    warmupPrograms: 0,
+
+    /* --- SOMBRA SOB DEMANDA (ver secao 14.2) --- */
+    shadowAcc: 0,
+    shadowHz: 20,
+    shadowDirty: true,
+
+    /* --- ORCAMENTO DE ENGASGO (ver secao 9.1) ---
+       Num jogo de ritmo o audio e o coracao: o agendador do GH.Conductor e
+       servido na MESMA thread do rAF, entao um frame longo atrasa o tick e a
+       janela de lookahead (0,20 s) passa. Contamos engasgos para poder
+       degradar por PICO, e nao so por fps medio baixo. */
+    hitchCount: 0,
+    hitchWindow: 0,
+    hitchWorstMs: 0,
+    hitchTotal: 0,
+
+    /* --- JANELA DE 10 s PARA O OVERLAY DE DIAGNOSTICO (secao 4.1) ---
+       Um balde fechado por segundo: fps daquele segundo e o pior frame
+       daquele segundo. Custo por frame: uma comparacao e uma soma — barato o
+       bastante para ficar sempre ligado, o que importa porque o jogador so
+       aperta F3 DEPOIS de ouvir a musica cortar. Se so medissemos com o
+       overlay aberto, os 10 s que interessam ja teriam passado. */
+    winFps: [],
+    winWorst: [],
+    winIdx: 0,
+    secWorstMs: 0,
+
+    /* contagem de perda/restauracao de contexto WebGL (hipotese (c) da 4.1) */
+    contextLostCount: 0,
+    contextRestoredCount: 0,
+
+    /* fotografia do renderer.info do ultimo frame (ver renderFrame) */
+    gfx: { calls: 0, triangles: 0, points: 0, lines: 0 }
   };
+
+  var WIN_SEC = 10;              /* tamanho da janela deslizante, em segundos */
+
+  /* Um frame acima disto ja compromete a janela de lookahead do audio.
+     0,090 s = quase metade da janela; dois seguidos e ela ja era. */
+  var HITCH_MS = 90;
+
+  /* =======================================================================
+     4.1 IDENTIDADE DA GPU — a pergunta "isto esta rodando por SOFTWARE?"
+
+     Um jogo com bloom + SMAA + ACES nao roda a 0% de GPU dedicada. Quando o
+     Gerenciador de Tarefas do Windows mostra CPU alta e GPU parada, quase
+     sempre e uma destas tres coisas:
+
+       (a) aceleracao por hardware DESLIGADA no navegador -> o WebGL cai para
+           SwiftShader/llvmpipe, que rasteriza na CPU, na MESMA thread que
+           serve o agendador de audio. A musica corta porque o rasterizador
+           roubou o quadro;
+       (b) o navegador preso na GPU integrada em vez da dedicada;
+       (c) o contexto WebGL foi perdido e voltou em modo software.
+
+     Nada disso da para adivinhar de dentro do jogo sem PERGUNTAR ao driver.
+     E o que esta funcao faz — uma vez no init e de novo a cada restauracao de
+     contexto, nunca no laco de render. O overlay de diagnostico (F3) mostra o
+     resultado em letra grande e vermelha, porque e a diferenca entre "o jogo
+     esta pesado" e "o jogo nao esta usando a placa de video".
+     ======================================================================= */
+
+  /* Assinaturas de rasterizador por SOFTWARE. `swiftshader` (Chrome/Edge),
+     `llvmpipe`/`softpipe`/`mesa offscreen` (Mesa), `microsoft basic`/`warp`
+     (fallback do Windows), `adreno (tm) 6xx`-nao — so software mesmo. */
+  var SOFT_RE = /swiftshader|llvmpipe|softpipe|\bsoftware\b|microsoft\s*basic|mesa\s*offscreen|\bwarp\b|generic\s*renderer/i;
+  /* GPU dedicada de verdade. */
+  var DISCRETE_RE = /nvidia|geforce|quadro|\brtx\b|\bgtx\b|radeon|\bamd\b|firepro|arc\s*a\d/i;
+  /* GPU integrada (nao e defeito, mas explica post-processing engasgado). */
+  var INTEGRATED_RE = /intel|uhd\s*graphics|hd\s*graphics|iris|apple\s*m\d|mali|adreno|videocore/i;
+
+  var gpuInfo = {
+    read: false,          /* conseguimos perguntar ao driver? */
+    unmasked: false,      /* veio de WEBGL_debug_renderer_info (o nome REAL) */
+    renderer: '',         /* GL_RENDERER (o melhor que conseguimos) */
+    vendor: '',           /* GL_VENDOR */
+    maskedRenderer: '',   /* o que o GL entrega sem a extensao */
+    maskedVendor: '',
+    version: '',
+    glsl: '',
+    webgl2: false,
+    software: false,      /* <- o alerta vermelho */
+    /* CAVEAT: resposta da sondagem da secao 3.1. true = o navegador NAO
+       consegue criar contexto acelerado; e a prova independente do nome. */
+    caveat: false,
+    caveatProbed: false,  /* a sondagem chegou a rodar? (null = inconclusiva) */
+    discrete: false,
+    integrated: false,
+    maxTextureSize: 0,
+    maxAnisotropy: 0,
+    kind: 'desconhecida', /* rotulo pronto para a tela */
+    /* o que foi PEDIDO ao navegador na criacao do contexto — se isto aqui
+       nao disser 'high-performance', o resto da investigacao e perda de tempo */
+    powerPreference: 'high-performance',
+    contextLosses: 0,     /* quantas vezes o contexto caiu desde o boot */
+    contextRestores: 0,
+    note: ''              /* frase pronta, em portugues, para o overlay */
+  };
+
+  function readGpuInfo(r, refreshProbe) {
+    var g = gpuInfo;
+    g.read = false;
+    try {
+      var gl = r.getContext();
+      g.webgl2 = !!(r.capabilities && r.capabilities.isWebGL2);
+      g.maskedRenderer = String(gl.getParameter(gl.RENDERER) || '');
+      g.maskedVendor = String(gl.getParameter(gl.VENDOR) || '');
+      g.version = String(gl.getParameter(gl.VERSION) || '');
+      g.glsl = String(gl.getParameter(gl.SHADING_LANGUAGE_VERSION) || '');
+      g.renderer = g.maskedRenderer;
+      g.vendor = g.maskedVendor;
+      g.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+
+      /* O nome sem mascara e o unico que distingue "ANGLE (Google, Vulkan...)"
+         de "ANGLE (NVIDIA, GeForce GTX 1060...)". A extensao pode nao existir
+         (Firefox com privacy.resistFingerprinting, por exemplo) — ai ficamos
+         com o mascarado mesmo, e dizemos isso na tela. */
+      var ext = null;
+      try { ext = gl.getExtension('WEBGL_debug_renderer_info'); } catch (e1) { ext = null; }
+      if (ext) {
+        var ur = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+        var uv = gl.getParameter(ext.UNMASKED_VENDOR_WEBGL);
+        if (ur) { g.renderer = String(ur); g.unmasked = true; }
+        if (uv) { g.vendor = String(uv); }
+      }
+      try { g.maxAnisotropy = r.capabilities.getMaxAnisotropy() || 0; } catch (e2) { g.maxAnisotropy = 0; }
+      g.read = true;
+    } catch (e) {
+      warn('nao consegui ler a identidade da GPU', e);
+    }
+
+    /* O ORACULO (secao 3.1). Um contexto de 2x2 criado e destruido; o
+       resultado fica em cache porque o init ja precisou dele antes de existir
+       renderer (para decidir o `antialias` do canvas). Na restauracao de
+       contexto sondamos de novo: o adaptador pode ter mudado. */
+    var caveat = caveatOnce(refreshProbe === true);
+    g.caveatProbed = (caveat !== null);
+    g.caveat = (caveat === true);
+
+    var hay = (g.renderer + ' ' + g.vendor + ' ' + g.maskedRenderer + ' ' + g.maskedVendor).toLowerCase();
+    var byName = SOFT_RE.test(hay);
+    var looksReal = DISCRETE_RE.test(hay) || INTEGRATED_RE.test(hay);
+
+    /* O NOME manda quando existe. A sondagem decide o empate — e o caso do
+       navegador que esconde WEBGL_debug_renderer_info por privacidade
+       (Firefox com resistFingerprinting), onde `hay` vem generico demais para
+       acusar qualquer coisa e o caveat e a unica testemunha que sobra. */
+    g.software = byName || (g.caveat === true && !looksReal);
+    g.discrete = !g.software && DISCRETE_RE.test(hay);
+    g.integrated = !g.software && !g.discrete && INTEGRATED_RE.test(hay);
+    g.kind = g.software ? 'software' :
+             (g.discrete ? 'dedicada' : (g.integrated ? 'integrada' : 'desconhecida'));
+
+    /* frase pronta para o overlay — quem le nao e programador de GPU */
+    if (g.software) {
+      g.note = 'SEM ACELERACAO POR HARDWARE: quem esta desenhando e a CPU'
+             + (g.renderer ? ' (' + g.renderer + ')' : '')
+             + '. Ligue a aceleracao por hardware nas configuracoes do navegador e reinicie-o.';
+    } else if (g.integrated) {
+      g.note = 'Rodando na placa integrada (' + (g.renderer || '?') + '). Se houver GPU dedicada, '
+             + 'aponte o navegador para ela em Configuracoes de Grafico do Windows.';
+    } else if (g.discrete) {
+      g.note = 'Aceleracao por hardware ativa na GPU dedicada (' + g.renderer + ').';
+    } else if (g.caveat === true) {
+      g.note = 'O navegador recusou um contexto WebGL acelerado (caveat de desempenho).';
+    } else {
+      g.note = g.read ? ('Adaptador: ' + (g.renderer || 'desconhecido') + '.')
+                      : 'Nao foi possivel identificar o adaptador grafico.';
+    }
+
+    GH.Engine.softwareRenderer = g.software;
+    GH.Engine.gpuInfo = g;   /* identidade estavel: sempre o MESMO objeto */
+    if (g.software) {
+      warn('RENDERIZACAO POR SOFTWARE detectada (' + (g.renderer || '?') +
+           ') — a GPU nao esta sendo usada; ligue a aceleracao por hardware');
+    }
+    try { dispatch('gpu', g); } catch (eD) { /* ninguem ouvindo */ }
+    return g;
+  }
 
   /* Cores padrao — espelham o tema "para" (Ver-o-Peso) de GH.Palette.
      Usadas quando a paleta ainda nao carregou ou nao expoe a chave procurada,
@@ -866,6 +1192,7 @@
       c.far = (zFar === undefined) ? 48 : zFar;
       c.updateProjectionMatrix();
       if (L.key.shadow.map) { L.key.shadow.map.dispose(); L.key.shadow.map = null; }
+      markShadowsDirty();
     };
 
     return L;
@@ -1002,6 +1329,7 @@
       key: cKey, fill: cFill, rim: cRim, accent: cAcc, accent2: cAcc2
     };
     GH.Engine.themeName = state.themeName;
+    markShadowsDirty();
     dispatch('theme', state.themeName);
   }
 
@@ -1024,6 +1352,12 @@
      ======================================================================= */
 
   function chooseRTType(renderer) {
+    /* No modo de sobrevivencia por software o meio-float sai caro duas vezes:
+       o alvo tem o dobro do tamanho em memoria (mais banda para uma "GPU" que
+       e a CPU) e cada leitura/escrita de fragmento passa por conversao de
+       meio-float no rasterizador. Em byte a imagem ganha um pouco de banding
+       no degrade do fundo — e um preco justo pela musica nao estalar. */
+    if (state.quality === 'software') return THREE.UnsignedByteType;
     /* Meio-float mata o banding do degrade do fundo e deixa o bloom bem mais
        bonito. Em WebGL2 o RGBA16F so e renderizavel com EXT_color_buffer_float
        (ou _half_float); `extensions.has()` ja habilita a extensao. */
@@ -1045,11 +1379,13 @@
     var pw = Math.max(2, Math.round(state.width * state.pixelRatio));
     var ph = Math.max(2, Math.round(state.height * state.pixelRatio));
 
+    var rtType = chooseRTType(renderer);
+    state.rtTypeUsed = rtType;
     var rtOpts = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
-      type: chooseRTType(renderer),
+      type: rtType,
       stencilBuffer: false,
       depthBuffer: true
     };
@@ -1110,7 +1446,32 @@
 
     applyAAMode(tier.aa);
     applyBloomResolution(tier.bloomScale);
+    applyBloomEnabled(tier);
+    applyGradeDetail(tier);
     updateGradeResolution();
+  }
+
+  /* Liga/desliga a passada de bloom inteira. Passe desabilitado e pulado pelo
+     EffectComposer (`isLastEnabledPass` cuida do renderToScreen), entao o
+     custo por frame vai a ZERO — diferente de baixar a forca para 0, que
+     ainda pagaria a piramide de borrao completa. */
+  function applyBloomEnabled(tier) {
+    var b = GH.Engine.bloomPass;
+    if (!b) return;
+    var on = (tier.bloomEnabled === false) ? false : true;
+    b.enabled = on;
+    GH.Engine.qualityScale.bloom = on;
+  }
+
+  /* Modo economico do shader de grade: sem halo hexagonal (6 amostras), sem
+     grao animado (2 hashes por pixel) e sem scanline. A passada continua
+     existindo — e ela quem faz linear->sRGB. */
+  function applyGradeDetail(tier) {
+    var lite = (tier.gradeLite === true);
+    gradeUniforms.uDetail.value = tier.detail;
+    gradeUniforms.uHalo.value = (tier.detail > 0.5 && !lite) ? 0.10 : 0.0;
+    gradeUniforms.uGrain.value = lite ? 0.0 : (tier.detail > 0.5 ? 0.030 : 0.020);
+    gradeUniforms.uScanline.value = lite ? 0.0 : 0.010;
   }
 
   function disposeComposer() {
@@ -1225,7 +1586,10 @@
     qs.maxLights = tier.maxLights;
     qs.anisotropy = tier.anisotropy;
     qs.renderScale = tier.renderScale;
-    qs.index = QUALITY_ORDER.indexOf(key);
+    /* ver a nota em QUALITY_PUBLIC_INDEX: 'software' e -1, os outros ficam
+       exatamente onde sempre estiveram (low=0 ... ultra=3) */
+    qs.index = (QUALITY_PUBLIC_INDEX[key] === undefined) ? QUALITY_ORDER.indexOf(key) : QUALITY_PUBLIC_INDEX[key];
+    qs.software = (key === 'software');
 
     if (!state.inited) return key;
 
@@ -1233,6 +1597,9 @@
 
     /* ---- pixel ratio ---- */
     var pr = clamp(baseDevicePixelRatio() * tier.renderScale, 0.5, 2);
+    /* teto duro de pixelRatio do nivel (o modo software trava em 1) — precisa
+       vir DEPOIS do clamp, senao um notebook com dpr 2 ainda entraria em 1.2 */
+    if (typeof tier.pixelRatioMax === 'number') pr = Math.min(pr, tier.pixelRatioMax);
     if (isCapture()) pr = 1; /* headless: 1:1 sempre, print deterministico */
     if (Math.abs(pr - state.pixelRatio) > 0.001) {
       state.pixelRatio = pr;
@@ -1251,24 +1618,56 @@
         if (L.key.shadow.map) { L.key.shadow.map.dispose(); L.key.shadow.map = null; }
       }
     }
-    renderer.shadowMap.needsUpdate = true;
+    /* cadencia do mapa de sombra por nivel (ver secao 14.2) */
+    state.shadowHz = tier.shadowHz || 20;
+    qs.shadowHz = state.shadowHz;
+    markShadowsDirty();
 
     /* ---- bloom / shader / AA ---- */
     applyBloomResolution(tier.bloomScale);
-    gradeUniforms.uDetail.value = tier.detail;
-    gradeUniforms.uHalo.value = tier.detail > 0.5 ? 0.10 : 0.0;
-    gradeUniforms.uGrain.value = tier.detail > 0.5 ? 0.030 : 0.020;
+    applyBloomEnabled(tier);
+    applyGradeDetail(tier);
     applyAAMode(tier.aa);
 
-    /* ---- MSAA muda o render target: precisa reconstruir a cadeia ---- */
+    /* ---- MSAA e TIPO DO ALVO mudam o render target: reconstruir a cadeia ----
+       O tipo entra aqui porque 'software' troca meio-float por byte; sem esta
+       checagem, entrar no modo de sobrevivencia por auto-degradacao manteria
+       o alvo RGBA16F que ele existe justamente para evitar. */
     var wantMsaa = (tier.msaa > 0 && renderer.capabilities && renderer.capabilities.isWebGL2 && !isCapture()) ? tier.msaa : 0;
-    if (wantMsaa !== state.msaaSamples) {
+    var wantRtType = chooseRTType(renderer);
+    if (wantMsaa !== state.msaaSamples || (state.rtTypeUsed !== null && wantRtType !== state.rtTypeUsed)) {
       disposeComposer();
       buildComposer();
     }
 
-    if (changed) dispatch('quality', key);
+    if (changed) {
+      pushQualityToSubsystems(key);
+      dispatch('quality', key);
+    }
     return key;
+  }
+
+  /* DEGRADACAO QUE DEGRADA DE VERDADE.
+     Ate aqui o engine ajustava so o que era dele (pixelRatio, sombra, bloom,
+     AA) e publicava GH.Engine.qualityScale — mas NINGUEM lia essa tabela
+     depois do boot: GH.FX.setQuality so era chamado uma vez, no init, e a
+     plateia do palco so consultava qualityScale.crowd na hora de nascer.
+     Resultado: a auto-degradacao por fps existia no papel e nao tirava uma
+     unica particula da tela. Aqui ela passa a chegar em quem gasta.
+
+     Perder 20% de particula e barato; estalar a musica nao e. */
+  var QUALITY_CLIENTS = ['FX', 'Stage', 'Notes', 'Highway', 'Materials', 'HUD'];
+  function pushQualityToSubsystems(key) {
+    for (var i = 0; i < QUALITY_CLIENTS.length; i++) {
+      var m = GH[QUALITY_CLIENTS[i]];
+      if (!m || typeof m.setQuality !== 'function') continue;
+      /* nome legado: os subsistemas nao sao meus e so conhecem low/med/high/
+         ultra (GH.Materials, por exemplo, cai no `else` -> texScale 1 diante
+         de um nome desconhecido, que e o oposto do que 'software' quer). A
+         tabela `qualityScale` vai junto e continua tendo os numeros reais. */
+      try { m.setQuality(legacyQualityName(key), GH.Engine.qualityScale); }
+      catch (e) { warn('GH.' + QUALITY_CLIENTS[i] + '.setQuality falhou', e); }
+    }
   }
 
   function stepQuality(delta) {
@@ -1283,6 +1682,31 @@
   function updateAutoQuality(dt) {
     if (!state.autoQuality || isCapture()) return;
     state.qualityCooldown = Math.max(0, state.qualityCooldown - dt);
+
+    /* ---- 9.1 REACAO A ENGASGO (antes do cooldown, de proposito) ----------
+       A media de fps e cega para o que mais machuca um jogo de ritmo: um
+       unico frame de 200-400 ms. Ele mal move a media exponencial (um frame
+       de 300 ms puxa a EMA de 60 para ~55 e ela se recupera em meio segundo),
+       mas e mais que a janela de lookahead de 0,20 s do agendador de audio —
+       ou seja, e exatamente o frame que estala a musica.
+
+       Entao contamos engasgos numa janela deslizante de 6 s. Dois engasgos
+       ali dentro e motivo suficiente para descer um nivel na hora, sem
+       esperar os 2,2 s de fps baixo sustentado.                            */
+    state.hitchWindow += dt;
+    if (state.hitchWindow > 6) { state.hitchWindow = 0; state.hitchCount = 0; }
+    if (state.frame >= 90 && state.hitchCount >= 2 && QUALITY_ORDER.indexOf(state.quality) > 0) {
+      if (stepQuality(-1)) {
+        state.autoDowngrades++;
+        state.qualityCooldown = 4.0;
+        state.hitchCount = 0;
+        state.hitchWindow = 0;
+        state.slowSeconds = 0;
+        warn('engasgo (pior ' + state.hitchWorstMs.toFixed(0) + ' ms) -> qualidade ' + state.quality);
+        return;
+      }
+    }
+
     if (state.qualityCooldown > 0) return;
     if (state.frame < 90) return; /* ignora o aquecimento de shaders */
 
@@ -1388,6 +1812,7 @@
     cam.updateProjectionMatrix();
 
     applySizeToTargets();
+    markShadowsDirty();
     dispatch('resize', m);
   }
 
@@ -1642,12 +2067,27 @@
     if (!state.settingsHooked) {
       try {
         if (GH.Settings && typeof GH.Settings.onChange === 'function') {
-          if (GH.Settings.quality && QUALITY_TIERS[GH.Settings.quality] && GH.Settings.quality !== state.requestedQuality) {
+          /* PREFERENCIA SALVA x MODO DE SOBREVIVENCIA.
+             O jogador ja jogou aqui um dia com GPU e deixou "Alta" salvo no
+             localStorage. Hoje o navegador esta sem aceleracao. Se deixassemos
+             a preferencia salva vencer, o engine detectaria o software, cairia
+             para 'software' e — 20 frames depois, quando GH.Settings finalmente
+             existisse — voltaria sozinho para 'alta'. O jogador nao pediu nada:
+             o disco pediu. Enquanto o lock estiver de pe, so uma escolha FEITA
+             AGORA no menu (que passa por setQuality com opts.auto ausente,
+             derrubando o lock explicitamente) tem esse poder. */
+          if (GH.Settings.quality && QUALITY_TIERS[GH.Settings.quality] &&
+              GH.Settings.quality !== state.requestedQuality && !state.softwareLock) {
             setQuality(GH.Settings.quality);
           }
           GH.Settings.onChange(function (s, key) {
             if (key && key !== 'quality') return;
-            if (s && s.quality && QUALITY_TIERS[s.quality] && s.quality !== state.requestedQuality) setQuality(s.quality);
+            if (s && s.quality && QUALITY_TIERS[s.quality] && s.quality !== state.requestedQuality) {
+              /* mudanca vinda do menu = ordem do jogador: solta o lock */
+              state.softwareLock = false;
+              GH.Engine.softwareMode = false;
+              setQuality(s.quality);
+            }
           });
           state.settingsHooked = true;
         }
@@ -1662,10 +2102,188 @@
      14. SIMULACAO E RENDER
      ======================================================================= */
 
+  /* =======================================================================
+     14.1 AQUECIMENTO — o conserto do "estalo quando tem muitos objetos"
+
+     MEDIDO nesta cena (shots/_perfload.html, gameplay_sp em t=41,5):
+       - o telao de LED entrava no modo "marajoara" pela primeira vez la pelo
+         segundo 57 da musica e so ENTAO mandava GH.Materials construir o
+         atlas 1024x1024 daquele grafismo: UM frame de 440 ms;
+       - quatro programas GLSL (fumaca escura do erro, confete) eram
+         compilados na primeira vez que aquele material aparecia — ou seja,
+         no primeiro ERRO do jogador e na primeira comemoracao.
+
+     Um frame desses e maior que a janela de lookahead do GH.Conductor
+     (0,20 s). Como JavaScript nao e preemptivo, o setInterval de 25 ms do
+     agendador so roda quando o frame termina: a janela passa e as notas sao
+     agendadas com tempo JA PASSADO. O WebAudio dispara na hora, fora do
+     compasso — e isso soa exatamente como "uma trepidada de ruido".
+
+     A cura e simples e definitiva: nada pode nascer durante a musica.
+     Aqui compilamos TODOS os shaders da cena (inclusive os de objetos
+     invisiveis — renderer.compile percorre com scene.traverse, nao
+     traverseVisible) e emitimos o evento 'warmup', no qual cada subsistema
+     constroi de uma vez o que so usaria mais tarde.
+
+     Roda uma unica vez, no primeiro frame simulado — que acontece durante o
+     carregamento, nunca durante a musica.
+     ======================================================================= */
+  function warmup() {
+    if (state.warmedUp || !state.inited) return GH.Engine;
+    state.warmedUp = true;
+    GH.Engine.warmedUp = true;
+
+    var t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    var r = GH.Engine.renderer;
+    var before = (r && r.info.programs) ? r.info.programs.length : 0;
+
+    /* 1. os subsistemas constroem seus recursos preguicosos AGORA.
+          Vem antes do compile: o que eles criarem tambem tem que compilar. */
+    dispatch('warmup', GH.Engine);
+
+    /* 2. compila todo material pendurado na cena, visivel ou nao */
+    try {
+      if (r && typeof r.compile === 'function') r.compile(GH.Engine.scene, GH.Engine.camera);
+    } catch (e) { warn('renderer.compile falhou no aquecimento', e); }
+
+    /* 3. um frame completo de verdade: e o que compila as variantes de
+          PROFUNDIDADE do mapa de sombra e as passadas do composer, que o
+          renderer.compile nao alcanca. */
+    try {
+      if (r) r.shadowMap.needsUpdate = true;
+      renderFrame(1 / 60);
+    } catch (e2) { warn('frame de aquecimento falhou', e2); }
+
+    /* 4. AS VARIANTES DA PROPRIA DEGRADACAO — ver secao 14.3 */
+    warmupQualityVariants(r);
+
+    var t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    state.warmupMs = t1 - t0;
+    state.warmupPrograms = ((r && r.info.programs) ? r.info.programs.length : 0) - before;
+    GH.Engine.warmupMs = state.warmupMs;
+    dispatch('warmedup', state.warmupMs);
+    return GH.Engine;
+  }
+
+  /* =======================================================================
+     14.3 AQUECER AS VARIANTES DA DEGRADACAO
+          (ou: a cura nao pode ser mais uma dose da doenca)
+
+     MEDIDO em shots/_degdrive.js, que falsifica o relogio do rAF para que um
+     "frame de 300 ms" custe zero segundo de parede e o teste inteiro feche
+     dentro de um --dump-dom:
+
+       ao descer de `high` para `low`, o contador de programas GLSL do
+       renderer saltava de 108 para 138 — TRINTA shaders compilados de uma
+       vez — e o frame da troca custava 1749 ms.
+
+     A causa e conhecida e brutal: o three.js assa `USE_SHADOWMAP`, o tipo do
+     mapa de sombra e a contagem de luzes DENTRO de cada programa. Quando
+     `shadowMap.enabled` vira false (que e o que o nivel `low` faz), TODO
+     material que recebia sombra perde a variante compilada e precisa de uma
+     nova. O driver compila sincronamente, na thread principal.
+
+     E o momento em que isso acontece e o pior possivel: a auto-degradacao e
+     disparada justamente porque a maquina ja esta engasgando. O remedio saia
+     mais caro que a doenca — e um frame de 1,7 s e nove vezes a janela de
+     lookahead de 0,20 s do agendador de audio.
+
+     A cura segue a doutrina do resto deste arquivo: NADA NASCE DURANTE A
+     MUSICA. E, em vez de eu adivinhar QUAIS parametros do tier mudam o
+     cacheKey do programa (sombra? AA? contagem de luz? MSAA?), o aquecimento
+     simplesmente VISITA os quatro niveis de verdade e renderiza um frame em
+     cada um. O que existir de shader, de alvo de render e de mapa de sombra
+     em qualquer nivel passa a existir antes da primeira nota. Depois disso,
+     degradar so troca ponteiros para o que ja esta compilado.
+
+     Isso e mais lento de escrever no papel e mais barato de estar certo: nao
+     depende de eu conhecer o cacheKey interno do three, que muda de versao
+     para versao.
+
+     No MODO CAPTURA o passeio e pulado: la o pixelRatio e travado em 1, a
+     auto-qualidade esta desligada e o print sai sempre no mesmo nivel —
+     seriam segundos de espera por captura sem nenhum beneficio.
+     ======================================================================= */
+  function warmupQualityVariants(r) {
+    if (!r || isCapture()) return;
+
+    var original = state.quality;
+
+    /* PASSEIO CURTO NO MODO DE SOBREVIVENCIA.
+       Numa maquina rasterizando por software, visitar 'high' e 'ultra' custa
+       renderizar 1080p com bloom, SMAA e mapa de sombra 4096 na CPU — foram
+       esses os frames de centenas de milissegundos que estavamos tentando
+       evitar, so que agora no carregamento. E nao serve para nada: com o lock
+       de software ligado a auto-degradacao nunca sobe ate la. Aquecemos
+       apenas o vizinho de cima, que e o unico destino alcancavel. */
+    var tour = state.softwareLock ? ['software', 'low'] : QUALITY_ORDER;
+
+    try {
+      for (var i = 0; i < tour.length; i++) {
+        if (tour[i] === original) continue;
+        setQuality(tour[i], { auto: true });
+        /* compile() cobre os materiais da cena; o frame cobre o que ele nao
+           alcanca — as passadas do composer e as variantes de profundidade
+           do mapa de sombra. */
+        if (typeof r.compile === 'function') r.compile(GH.Engine.scene, GH.Engine.camera);
+        r.shadowMap.needsUpdate = true;
+        renderFrame(1 / 60);
+      }
+    } catch (e) { warn('passeio pelos niveis de qualidade falhou', e); }
+
+    /* volta exatamente para onde estava, aconteca o que acontecer */
+    try {
+      setQuality(original, { auto: true });
+      if (typeof r.compile === 'function') r.compile(GH.Engine.scene, GH.Engine.camera);
+      r.shadowMap.needsUpdate = true;
+      renderFrame(1 / 60);
+    } catch (e2) { warn('retorno ao nivel original falhou', e2); }
+
+    markShadowsDirty();
+  }
+
+
+  /* =======================================================================
+     14.2 SOMBRA SOB DEMANDA
+     Quem projeta sombra nesta cena e a ferragem da linha de acerto (barra,
+     capsulas e bezel dos trastes) — geometria praticamente parada. O
+     shadowMap.autoUpdate padrao redesenha o mapa inteiro 60 vezes por
+     segundo para nada. Baixamos a cadencia e avisamos explicitamente quando
+     algo muda de verdade (qualidade, tamanho, tema, contexto restaurado).
+
+     No MODO CAPTURA nada disso vale: la o mapa e atualizado todo frame para
+     o print sair identico em qualquer maquina.
+     ======================================================================= */
+  function markShadowsDirty() {
+    state.shadowDirty = true;
+    state.shadowAcc = 1e9;
+  }
+
+  function updateShadowCadence(dt) {
+    var r = GH.Engine.renderer;
+    if (!r) return;
+    if (isCapture() || !r.shadowMap.enabled) {
+      r.shadowMap.autoUpdate = true;
+      return;
+    }
+    r.shadowMap.autoUpdate = false;
+    state.shadowAcc += dt;
+    var per = 1 / Math.max(1, state.shadowHz);
+    if (state.shadowAcc >= per || state.shadowDirty) {
+      state.shadowAcc = 0;
+      state.shadowDirty = false;
+      r.shadowMap.needsUpdate = true;
+    }
+  }
+
   function simulate(dt) {
     state.elapsed += dt;
     GH.Engine.elapsed = state.elapsed;
     GH.Engine.dt = dt;
+
+    /* primeiro frame simulado = o jogo ja esta todo montado: aquece aqui,
+       antes que qualquer nota toque */
+    if (!state.warmedUp) warmup();
 
     tryLateHooks();
     runUpdaters(dt, state.elapsed);
@@ -1674,6 +2292,7 @@
     updateCameraRig(dt);
     /* depois do rig: quem precisa da camera ja no lugar final deste frame */
     if (state.lateUpdaters.length) runLateUpdaters(dt, state.elapsed);
+    updateShadowCadence(dt);
   }
 
   function renderFrame(dt) {
@@ -1685,6 +2304,14 @@
     if (tier.aa === 'smaa' && GH.Engine.smaaPass && !GH.Engine.smaaPass.enabled && !state.smaaReady) {
       applyAAMode('smaa');
     }
+
+    /* renderer.info.autoReset fica DESLIGADO (ver init) e o zero e dado aqui,
+       uma vez por frame. Com autoReset ligado, cada passada do composer
+       zerava o contador, e o `calls` que sobrava no fim do frame era o da
+       ULTIMA passada (um quad de tela cheia: 1 chamada). O diagnostico
+       mostrava "1 draw call" num frame com centenas — inutil. Assim o numero
+       e o custo REAL do frame inteiro, cena + pos-processamento. */
+    if (renderer.info.autoReset === false) renderer.info.reset();
 
     if (state.composerOk && GH.Engine.composer) {
       try {
@@ -1698,6 +2325,14 @@
       try { renderer.setRenderTarget(null); renderer.render(GH.Engine.scene, GH.Engine.camera); } catch (e3) { warn('render direto falhou', e3); }
     }
 
+    /* fotografia barata (4 leituras) do custo do frame — o overlay le daqui e
+       nunca do renderer.info direto, que ja teria sido zerado no frame
+       seguinte quando o painel for pintado. */
+    var ri = renderer.info.render;
+    var gfx = state.gfx;
+    gfx.calls = ri.calls; gfx.triangles = ri.triangles;
+    gfx.points = ri.points; gfx.lines = ri.lines;
+
     state.frame++;
     GH.Engine.frame = state.frame;
   }
@@ -1705,11 +2340,14 @@
   function updateFps(rawDt) {
     if (rawDt <= 0) return;
     var inst = 1 / rawDt;
+    var ms = rawDt * 1000;
     state.fpsInstant = inst;
     /* media movel exponencial + amostra por segundo (mais estavel) */
     state.fps = state.fps * 0.92 + inst * 0.08;
     state.fpsAccum += rawDt;
     state.fpsFrames++;
+    /* pior frame DO SEGUNDO em curso (janela deslizante do diagnostico) */
+    if (ms > state.secWorstMs) state.secWorstMs = ms;
     if (state.fpsAccum >= 1.0) {
       /* amostra fechada de 1 segundo: imune a um unico frame perdido */
       var s = state.fpsFrames / state.fpsAccum;
@@ -1720,10 +2358,25 @@
       state.fpsAvg = sum / state.fpsSamples.length;
       state.fpsAccum = 0;
       state.fpsFrames = 0;
+      /* fecha o balde do segundo na janela circular de 10 s */
+      var wi = state.winIdx % WIN_SEC;
+      state.winFps[wi] = s;
+      state.winWorst[wi] = state.secWorstMs;
+      state.winIdx++;
+      state.secWorstMs = 0;
     }
     GH.Engine.fps = state.fps;
     GH.Engine.fpsAvg = state.fpsAvg;
     GH.Engine.fpsInstant = inst;
+
+    /* contabiliza engasgo — a metrica que protege o audio (ver 9.1) */
+    if (ms > HITCH_MS) {
+      state.hitchCount++;
+      state.hitchTotal++;
+      if (ms > state.hitchWorstMs) state.hitchWorstMs = ms;
+      GH.Engine.hitches = state.hitchTotal;
+      GH.Engine.worstFrameMs = state.hitchWorstMs;
+    }
   }
 
   function tick(now) {
@@ -1793,7 +2446,10 @@
     canvas.addEventListener('webglcontextlost', function (ev) {
       ev.preventDefault();                    /* obrigatorio pra poder restaurar */
       state.contextLost = true;
+      state.contextLostCount++;
+      gpuInfo.contextLosses = state.contextLostCount;
       GH.Engine.contextLost = true;
+      GH.Engine.contextLosses = state.contextLostCount;
       state.wasRunningBeforeLoss = state.running;
       stop();
       warn('contexto WebGL perdido — aguardando restauracao');
@@ -1803,11 +2459,32 @@
     canvas.addEventListener('webglcontextrestored', function () {
       warn('contexto WebGL restaurado — reconstruindo cadeia de pos-processamento');
       state.contextLost = false;
+      state.contextRestoredCount++;
+      gpuInfo.contextRestores = state.contextRestoredCount;
       GH.Engine.contextLost = false;
+      GH.Engine.contextRestores = state.contextRestoredCount;
       state.smaaReady = false;
       try {
         var r = GH.Engine.renderer;
         if (r) {
+          /* o contexto novo pode ter voltado em OUTRO adaptador — inclusive no
+             rasterizador por software. Reperguntamos ao driver: e a hipotese
+             (c) da secao 4.1, e sem isto o diagnostico mentiria. O `true`
+             refaz tambem a sondagem de caveat: o cache do boot descreve um
+             contexto que nao existe mais. */
+          readGpuInfo(r, true);
+
+          /* Se voltamos EM SOFTWARE, o modo de sobrevivencia entra agora —
+             e este e exatamente o cenario "a musica cortava so depois de um
+             tempo de jogo": o contexto caiu no meio da partida e o jogo
+             continuou pedindo bloom + SMAA para uma CPU. */
+          if (gpuInfo.software && !isCapture() && !state.softwareLock) {
+            state.softwareLock = true;
+            GH.Engine.softwareMode = true;
+            state.quality = state.requestedQuality = 'software';
+            warn('contexto restaurado EM SOFTWARE — entrando no modo de sobrevivencia');
+          }
+          r.info.autoReset = false;
           r.setPixelRatio(state.pixelRatio);
           r.setSize(state.width, state.height, !!state.forcedSize);
           r.shadowMap.needsUpdate = true;
@@ -1816,6 +2493,13 @@
         buildComposer();
         setQuality(state.quality, { auto: true });
         resize();
+        /* o contexto novo perdeu TODOS os programas GLSL: se nao reaquecermos,
+           eles voltariam a ser compilados um a um durante a musica — que e
+           exatamente o defeito consertado na secao 14.1 */
+        state.warmedUp = false;
+        GH.Engine.warmedUp = false;
+        markShadowsDirty();
+        warmup();
       } catch (e) {
         warn('falha ao reconstruir apos restauracao', e);
         state.composerOk = false;
@@ -1853,18 +2537,34 @@
        O grade (uGamma/uBlack/uContrast) foi reconferido com a flag ligada. */
     GH.Engine.colorManagement = !!(THREE.ColorManagement && THREE.ColorManagement.legacyMode === false);
 
-    /* --- renderer --- */
+    /* --- renderer ---
+       SONDAGEM ANTES DA CRIACAO (secao 3.1): saber que nao ha aceleracao
+       ANTES de nascer o contexto do jogo permite ja pedi-lo sem MSAA de
+       canvas. Com EffectComposer o antialias do canvas nao serve para nada
+       (a cena e desenhada num render target e so a ultima passada toca o
+       framebuffer padrao) — mas ele FORCA um framebuffer multiamostrado, e
+       num rasterizador por software isso e uma resolucao de amostras por
+       pixel, todo frame, de graca e para nada. */
+    var noHwAccel = (caveatOnce() === true);
+
     var renderer;
     try {
       renderer = new THREE.WebGLRenderer({
         canvas: canvas,
-        antialias: true,
+        antialias: !noHwAccel,
+        /* NAO E ENFEITE: em maquina com GPU hibrida (Optimus / switchable) e
+           este atributo que faz o navegador pedir ao driver o adaptador de
+           alto desempenho em vez da integrada. Se algum dia alguem recriar o
+           contexto por fora, tem que repetir isto aqui. */
         powerPreference: 'high-performance',
         stencil: true,
         alpha: false,
         depth: true,
         logarithmicDepthBuffer: false,
         preserveDrawingBuffer: isCapture(),  /* o screenshot headless agradece */
+        /* PROIBIDO ligar aqui: numa maquina sem GPU o contexto nao nasceria e
+           o jogo abriria preto, que o contrato veta. Quem pergunta isso e a
+           sondagem descartavel da secao 3.1, que nao pode derrubar nada. */
         failIfMajorPerformanceCaveat: false
       });
     } catch (e) {
@@ -1887,7 +2587,8 @@
     renderer.autoClear = true;
     renderer.sortObjects = true;
     renderer.setClearColor(DEFAULT_THEME.bg, 1);
-    renderer.info.autoReset = true;
+    /* zerado a mao no comeco de cada frame (ver renderFrame) */
+    renderer.info.autoReset = false;
     /* deixamos a validacao de shader ligada: erro de GLSL vira log, nunca
        tela preta silenciosa (contrato, secao 10) */
     renderer.debug.checkShaderErrors = true;
@@ -1895,6 +2596,10 @@
     GH.Engine.renderer = renderer;
     GH.Engine.capabilities = renderer.capabilities;
     GH.Engine.maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+
+    /* pergunta ao driver QUEM esta desenhando (secao 4.1). Uma vez so, aqui:
+       e a informacao que separa "jogo pesado" de "jogo sem placa de video". */
+    readGpuInfo(renderer);
 
     /* --- cena + neblina --- */
     var scene = new THREE.Scene();
@@ -1964,7 +2669,35 @@
     state.quality = state.requestedQuality =
       (opts.quality && QUALITY_TIERS[opts.quality]) ? opts.quality
       : (savedQuality || pickInitialQuality());
-    state.pixelRatio = isCapture() ? 1 : clamp(baseDevicePixelRatio() * QUALITY_TIERS[state.quality].renderScale, 0.5, 2);
+
+    /* ---- MODO DE SOBREVIVENCIA POR SOFTWARE ----------------------------
+       Se quem esta rasterizando e a CPU, o nivel escolhido acima nao importa:
+       ele foi decidido por tamanho de tela ou por uma preferencia salva numa
+       epoca em que a maquina tinha GPU. Descemos para 'software' AQUI, ANTES
+       do buildComposer — assim a cadeia ja nasce sem MSAA, com alvo em byte e
+       com o bloom pequeno, em vez de nascer cara e ser desmontada depois.
+
+       Duas excecoes, ambas deliberadas:
+         - MODO CAPTURA: o headless de avaliacao roda de proposito com
+           --use-angle=swiftshader, ou seja, e SEMPRE software. Se o preset
+           entrasse ali, as 10 capturas canonicas mudariam de cara e o critico
+           visual julgaria um jogo que ninguem com GPU vai ver. A captura
+           mede IMAGEM; performance de captura nao existe.
+         - `opts.quality` explicito: quem chamou sabe o que quer (e as
+           bancadas de medicao dependem disso).                            */
+    state.softwareLock = false;
+    if (gpuInfo.software && !isCapture() && !(opts.quality && QUALITY_TIERS[opts.quality])) {
+      state.quality = state.requestedQuality = 'software';
+      state.softwareLock = true;
+      warn('modo de sobrevivencia por software ligado (renderer: ' + (gpuInfo.renderer || '?') + ')');
+    }
+    GH.Engine.softwareMode = state.softwareLock;
+
+    var tier0 = QUALITY_TIERS[state.quality];
+    state.pixelRatio = isCapture() ? 1 : clamp(baseDevicePixelRatio() * tier0.renderScale, 0.5, 2);
+    if (!isCapture() && typeof tier0.pixelRatioMax === 'number') {
+      state.pixelRatio = Math.min(state.pixelRatio, tier0.pixelRatioMax);
+    }
     renderer.setPixelRatio(state.pixelRatio);
     renderer.setSize(state.width, state.height, !!captureSize());
 
@@ -2022,6 +2755,113 @@
   }
 
   /* =======================================================================
+     16.1 DIAGNOSTICO PARA A TELA (GH.Engine.diag)
+
+     Tudo que o overlay de F3 mostra sai daqui, num objeto so. Chamado no
+     maximo 4x por segundo, NUNCA no laco de render, e sem tocar em layout do
+     DOM — as unicas leituras "caras" sao do contexto GL (drawingBuffer), que
+     nao sincronizam a GPU.
+     ======================================================================= */
+
+  /* Menor fps e pior frame dos ultimos 10 s, incluindo o segundo em curso. */
+  function windowStats() {
+    var n = state.winIdx < WIN_SEC ? state.winIdx : WIN_SEC;
+    var minFps = Infinity;
+    var worst = state.secWorstMs;    /* o segundo aberto conta desde ja */
+    for (var i = 0; i < n; i++) {
+      var f = state.winFps[i];
+      if (f < minFps) minFps = f;
+      if (state.winWorst[i] > worst) worst = state.winWorst[i];
+    }
+    /* o segundo em curso so vira "fps" depois de um quarto de segundo de
+       amostra — antes disso o numero e ruido puro */
+    if (state.fpsAccum > 0.25) {
+      var cur = state.fpsFrames / state.fpsAccum;
+      if (cur < minFps) minFps = cur;
+    }
+    if (!isFinite(minFps)) minFps = state.fps;
+    return { fpsMin: minFps, worstMs: worst, seconds: n };
+  }
+
+  function diag() {
+    var r = GH.Engine.renderer;
+    var w = windowStats();
+    var g = gpuInfo;
+    var dbw = 0, dbh = 0, ctxLost = state.contextLost;
+    try {
+      if (r) {
+        var gl = r.getContext();
+        dbw = gl.drawingBufferWidth || 0;
+        dbh = gl.drawingBufferHeight || 0;
+        if (typeof gl.isContextLost === 'function' && gl.isContextLost()) ctxLost = true;
+      }
+    } catch (e) { /* contexto morto: os zeros ja contam a historia */ }
+
+    var mem = (r && r.info && r.info.memory) ? r.info.memory : null;
+    var qi = QUALITY_ORDER.indexOf(state.quality);
+    var ri = QUALITY_ORDER.indexOf(state.requestedQuality);
+
+    return {
+      /* --- quadro --- */
+      fps: state.fps,
+      fpsAvg: state.fpsAvg,
+      fpsInstant: state.fpsInstant,
+      fpsMin10: w.fpsMin,
+      worstMs10: w.worstMs,
+      windowSec: w.seconds,
+      worstMsTotal: state.hitchWorstMs,
+      hitches: state.hitchTotal,
+      frame: state.frame,
+      running: state.running,
+      frozen: state.frozen,
+
+      /* --- imagem --- */
+      quality: state.quality,
+      requestedQuality: state.requestedQuality,
+      autoQuality: state.autoQuality,
+      autoDowngrades: state.autoDowngrades,
+      degraded: (qi >= 0 && ri >= 0 && qi < ri),
+      pixelRatio: state.pixelRatio,
+      devicePixelRatio: baseDevicePixelRatio(),
+      cssWidth: state.width,
+      cssHeight: state.height,
+      bufferWidth: dbw,
+      bufferHeight: dbh,
+      aa: state.aaMode,
+      composer: state.composerOk,
+      shadowHz: state.shadowHz,
+      warmedUp: state.warmedUp,
+      warmupMs: state.warmupMs,
+
+      /* --- custo do ultimo frame --- */
+      calls: state.gfx.calls,
+      triangles: state.gfx.triangles,
+      lines: state.gfx.lines,
+      points: state.gfx.points,
+      geometries: mem ? mem.geometries : 0,
+      textures: mem ? mem.textures : 0,
+      programs: (r && r.info.programs) ? r.info.programs.length : 0,
+
+      /* --- quem esta desenhando (secao 4.1) --- */
+      glRenderer: g.renderer,
+      glVendor: g.vendor,
+      glMaskedRenderer: g.maskedRenderer,
+      glVersion: g.version,
+      glUnmasked: g.unmasked,
+      webgl2: g.webgl2,
+      software: g.software,
+      caveat: g.caveat,
+      softwareMode: state.softwareLock,
+      gpuKind: g.kind,
+      maxTextureSize: g.maxTextureSize,
+      maxAnisotropy: g.maxAnisotropy,
+      contextLost: ctxLost,
+      contextLostCount: state.contextLostCount,
+      contextRestoredCount: state.contextRestoredCount
+    };
+  }
+
+  /* =======================================================================
      17. DISPOSE
      ======================================================================= */
 
@@ -2054,6 +2894,15 @@
     simulateOnly: simulateOnly,
     resize: resize,
     setSize: setSize,
+
+    /* aquecimento: compila todo shader e manda os subsistemas construirem
+       agora o que so usariam no meio da musica (secao 14.1). Roda sozinho no
+       primeiro frame simulado; publico para quem quiser antecipar. */
+    warmup: warmup,
+    warmedUp: false,
+    warmupMs: 0,
+    /* avisa que a sombra precisa ser refeita ja (secao 14.2) */
+    invalidateShadows: markShadowsDirty,
 
     /* ---- objetos three ---- */
     renderer: null,
@@ -2132,13 +2981,47 @@
     /* tabela lida pelos outros modulos (particulas, publico, texturas...) */
     qualityScale: {
       name: 'high', pixelRatio: 1, particles: 1.0, crowd: 1.0, shadows: true,
-      shadowMapSize: 2048, bloomScale: 0.6, aa: 'smaa', detail: 1.0,
+      shadowMapSize: 2048, shadowHz: 20, bloomScale: 0.6, aa: 'smaa', detail: 1.0,
       reflections: true, texScale: 1.0, maxLights: 8, anisotropy: 8,
-      renderScale: 1.0, index: 2
+      renderScale: 1.0, index: 2,
+      /* `bloom` false e `software` true so acontecem no preset de
+         sobrevivencia; quem desenha efeito aditivo pode querer compensar */
+      bloom: true, software: false
     },
+
+    /* ---- saude do frame (o que protege o audio) ---- */
+    hitches: 0,          /* frames acima de 90 ms desde o boot */
+    worstFrameMs: 0,
 
     /* ---- diagnostico ---- */
     log: state.log,
+    /* identidade da GPU lida do driver no init (secao 4.1). O overlay de F3
+       mostra isto; `software === true` e o alerta vermelho. */
+    gpu: gpuInfo,
+    /* NOME COMBINADO COM O AGENTE DO OVERLAY: `GH.Engine.gpuInfo`.
+       Mesmo objeto de `GH.Engine.gpu` (identidade estavel, mutado no lugar —
+       nunca substituido), com pelo menos estes campos:
+         { renderer, vendor, webgl2, software: bool, caveat: bool }
+       e mais, de brinde: kind ('software'|'dedicada'|'integrada'|
+       'desconhecida'), discrete, integrated, unmasked, note (frase pronta em
+       portugues), powerPreference, contextLosses, contextRestores.
+       `GH.Engine.on('gpu', fn)` avisa quando a leitura e refeita. */
+    gpuInfo: gpuInfo,
+    softwareRenderer: false,
+    /* true quando o preset 'software' foi ligado automaticamente */
+    softwareMode: false,
+    contextLosses: 0,
+    contextRestores: 0,
+    /* releitura sob demanda (o contexto pode ter trocado de adaptador).
+       `true` refaz tambem a sondagem de failIfMajorPerformanceCaveat. */
+    refreshGpuInfo: function (refreshProbe) {
+      return GH.Engine.renderer ? readGpuInfo(GH.Engine.renderer, refreshProbe === true) : gpuInfo;
+    },
+    /* sondagem crua da secao 3.1: true = so ha renderizacao por software,
+       false = ha aceleracao, null = inconclusivo. */
+    probeHardwareAcceleration: function () { return caveatOnce(true); },
+    /* retrato completo para a tela de diagnostico — ver secao 16.1 */
+    diag: diag,
     stats: function () {
       var r = GH.Engine.renderer;
       return {
@@ -2151,7 +3034,13 @@
         triangles: r ? r.info.render.triangles : 0,
         programs: (r && r.info.programs) ? r.info.programs.length : 0,
         composer: state.composerOk,
-        aa: state.aaMode
+        aa: state.aaMode,
+        warmedUp: state.warmedUp,
+        warmupMs: Math.round(state.warmupMs),
+        warmupPrograms: state.warmupPrograms,
+        shadowHz: state.shadowHz,
+        hitches: state.hitchTotal,
+        worstFrameMs: Math.round(state.hitchWorstMs)
       };
     }
   };

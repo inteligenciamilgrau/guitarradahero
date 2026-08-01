@@ -95,6 +95,27 @@
   }
   function safe(fn) { try { return fn(); } catch (e) { warn('stage', e); return null; } }
 
+  /* --- PERFIL POR SUBSISTEMA (custo zero quando desligado) -----------------
+     O palco e, de longe, o subsistema mais caro do frame. Quando um pico
+     aparece, adivinhar qual pedaco foi e perda de tempo: ligue
+     `GH.Stage.profile = true` e leia `GH.Stage.stats().perfil` — milissegundos
+     do ULTIMO frame por parte (publico, banda, rig, telao, haze, confete).
+     Com o perfil desligado a unica despesa e um `if`. */
+  var profOn = false;
+  var prof = { crowd: 0, band: 0, rig: 0, led: 0, haze: 0, confetti: 0 };
+  var profNow = (typeof performance !== 'undefined' && performance.now)
+    ? function () { return performance.now(); }
+    : function () { return Date.now(); };
+
+  /* roda fn medindo (ou nao) e sem deixar excecao escapar */
+  function safeProf(key, fn) {
+    if (!profOn) return safe(fn);
+    var t0 = profNow();
+    var r = safe(fn);
+    prof[key] = profNow() - t0;
+    return r;
+  }
+
   /* =========================================================================
      1. GEOMETRIA MESTRE DO PALCO
      Estes numeros sao a fonte da verdade deste arquivo. Foram calculados
@@ -385,6 +406,7 @@
 
   var backdrop = null;   /* ceu + camadas de parallax + rio                */
   var crowd = null;      /* publico instanciado + celulares                */
+  var crowdEnabled = true; /* false = nao renderiza nem atualiza o publico */
   var stageBuild = null; /* praticavel, barricada, PA, caixotes            */
   var band = null;       /* 6 musicos                                      */
   var led = null;        /* telao                                          */
@@ -1389,6 +1411,7 @@
 
   /* --- distribuicao do publico ------------------------------------------- */
   function buildCrowd() {
+    if (!crowdEnabled || crowd || !group) return;
     var g = new THREE.Group();
     g.name = 'GH_Stage_Crowd';
 
@@ -1520,7 +1543,7 @@
       geo.setAttribute('aOff', new THREE.InstancedBufferAttribute(off, 2).setUsage(THREE.DynamicDrawUsage));
       if (uvA) geo.setAttribute('aUv', new THREE.InstancedBufferAttribute(uvA, 2));
       g.add(im);
-      var set = { mesh: im, list: list, off: off, attr: geo.attributes.aOff };
+      var set = { mesh: im, list: list, off: off, attr: geo.attributes.aOff, far: !!isFar };
       crowd.sets.push(set);
       return set;
     }
@@ -1594,7 +1617,7 @@
   /* --- animacao do publico (loop quente) ---------------------------------- */
   var _crowdAcc = 0;
   function updateCrowd(dt) {
-    if (!crowd) return;
+    if (!crowdEnabled || !crowd) return;
     var energy = intensitySmooth;
     var mood = crowdMood;
     var amp = crowd.jumpBase * (0.40 + 0.85 * energy) * mood * (1 + crowdSurge * 1.1);
@@ -1603,8 +1626,17 @@
     var spB = spMix;
     var i, s, k, list, off;
 
+    /* Cadencia do LOD distante (ver 13.1). O set de indice 2 e o `far`:
+       billboards a mais de 30 unidades da camera. Em qualidade reduzida ele
+       e reanimado a cada `qCrowd` frames em vez de todo frame — a silhueta
+       continua pulando, so que com o mesmo passo amostrado mais grosso.
+       Nunca pulamos os sets de perto: aqueles se leem no quadro. */
+    _crowdAcc++;
+    var skipFar = (qCrowd > 1) && ((_crowdAcc % qCrowd) !== 0);
+
     for (s = 0; s < crowd.sets.length; s++) {
       var set = crowd.sets[s];
+      if (skipFar && set.far) continue;
       list = set.list; off = set.off;
       for (k = 0; k < list.length; k++) {
         var q = list[k];
@@ -2015,23 +2047,79 @@
     g.globalCompositeOperation = 'source-over';
 
     /* GRADE DE PIXEL: e isto que faz o painel virar LED e nao um jpeg */
-    g.globalCompositeOperation = 'multiply';
-    g.fillStyle = '#000000';
-    var step = 5;
-    for (i = 0; i < W; i += step) g.fillRect(i, 0, 1.6, H);
-    for (i = 0; i < H; i += step) g.fillRect(0, i, W, 1.6);
-    g.globalCompositeOperation = 'source-over';
+    g.drawImage(ledGridCanvas(), 0, 0);
 
-    /* vinheta suave */
+    /* vinheta suave (o gradiente e constante: criado uma vez, ver ledVig) */
+    g.fillStyle = ledVignette(g, W, H);
+    g.fillRect(0, 0, W, H);
+
+    led.tex.needsUpdate = true;
+  }
+
+  /* -------------------------------------------------------------------------
+     GRADE DE PIXEL DO TELAO — assada uma vez.
+
+     O BUG QUE ISTO CONSERTA (medido com sonda, nao suposto).
+     `shots/_leddrive.js` cronometrou CADA primitiva do canvas 2D do painel e
+     achou o culpado com endereco:
+
+         fillRect(455,0,1.6,128) = 357 ms
+         chamada #100 do frame · composicao="multiply" · fillStyle=#000000
+
+     Ou seja: UMA das 154 barrinhas da grade de pixel custou um terco de
+     segundo. Nao e coleta de lixo (provado: forcar gc() antes nao muda nada,
+     ver o REGIME B da sonda) — e o canvas 2D sendo arrancado do caminho
+     acelerado. O painel e reenviado como textura WebGL a cada desenho
+     (`led.tex.needsUpdate`) e por cima ainda pedimos 154 fillRects em modo
+     `multiply`; o Chromium conta as leituras de volta e, quando decide que
+     sao demais, migra o canvas inteiro para software de uma vez so. Essa
+     migracao caiu no meio da musica.
+
+     Um frame desses e maior que a janela de lookahead de 0,20 s do
+     GH.Conductor. JavaScript nao e preemptivo: o tick de 25 ms do agendador
+     de audio so roda quando o frame termina — a janela passa e as notas sao
+     agendadas com tempo JA PASSADO. O WebAudio dispara na hora, fora do
+     compasso. E exatamente a "trepidada de ruido" que o jogador ouviu.
+
+     A grade e IDENTICA em todo desenho: 128 barras verticais e 26
+     horizontais, sempre nas mesmas coordenadas, sempre preto opaco. Assamos
+     uma vez num canvas transparente e passamos a estampar com UM drawImage.
+
+     E o resultado e o MESMO PIXEL, nao uma aproximacao. Com origem preta
+     opaca (Cs=0) e destino opaco (ab=1), a formula de `multiply` do canvas
+     colapsa em (1-as)*Cb — que e literalmente `source-over` de preto. E as
+     barras que se cruzam tambem batem: aplicar as duas em sequencia da
+     (1-as1)(1-as2)*Cb, e assar as duas juntas da (1 - as1 - as2 + as1*as2),
+     que e o mesmo produto. Nada de aliasing novo, nada de cor diferente.
+
+     Ganho medido: 154 fillRects por desenho x 14 Hz = ~2160 fillRects por
+     segundo a menos, e ZERO uso de `multiply` no painel.
+     ------------------------------------------------------------------------- */
+  var ledGrid = null;
+  function ledGridCanvas() {
+    if (ledGrid) return ledGrid;
+    var cv = makeCanvas(LED_W, LED_H);
+    var g = cv.getContext('2d');
+    g.fillStyle = '#000000';
+    var step = 5, i;
+    for (i = 0; i < LED_W; i += step) g.fillRect(i, 0, 1.6, LED_H);
+    for (i = 0; i < LED_H; i += step) g.fillRect(0, i, LED_W, 1.6);
+    ledGrid = cv;
+    return ledGrid;
+  }
+
+  /* A vinheta tambem nunca muda — o gradiente era reconstruido 14 vezes por
+     segundo para sempre dar o mesmo objeto. */
+  var ledVig = null;
+  function ledVignette(g, W, H) {
+    if (ledVig) return ledVig;
     var vg = g.createLinearGradient(0, 0, W, 0);
     vg.addColorStop(0, 'rgba(0,0,0,0.45)');
     vg.addColorStop(0.08, 'rgba(0,0,0,0)');
     vg.addColorStop(0.92, 'rgba(0,0,0,0)');
     vg.addColorStop(1, 'rgba(0,0,0,0.45)');
-    g.fillStyle = vg;
-    g.fillRect(0, 0, W, H);
-
-    led.tex.needsUpdate = true;
+    ledVig = vg;
+    return ledVig;
   }
 
   function updateLed(dt) {
@@ -3517,6 +3605,8 @@
 
     theme = (P && P.current) || null;
     themeId = (theme && theme.id) || 'para';
+    try { crowdEnabled = !(GH.Settings && GH.Settings.crowd3D === false); }
+    catch (e0) { crowdEnabled = true; }
 
     group = new THREE.Group();
     group.name = 'GH_Stage';
@@ -3541,6 +3631,7 @@
     safe(function () { cameraRig.register(); });
     safe(function () { hookScoring(); });
     safe(function () { applyTheme(); });
+    safe(function () { hookEngine(); });
 
     /* segue trocas de tema feitas por outros modulos */
     try {
@@ -3597,12 +3688,13 @@
     /* o publico se recupera sozinho de uma vaia */
     if (crowdMoodTarget < 0.9) crowdMoodTarget = Math.min(1, crowdMoodTarget + dt * 0.12);
 
-    safe(function () { updateCrowd(dt); });
-    safe(function () { updateBand(dt); });
-    safe(function () { updateRig(dt); });
-    safe(function () { updateLed(dt); });
-    safe(function () { updateHaze(dt); });
-    safe(function () { updateConfetti(dt); });
+    if (crowdEnabled) safeProf('crowd', function () { updateCrowd(dt); });
+    else if (profOn) prof.crowd = 0;
+    safeProf('band',     function () { updateBand(dt); });
+    safeProf('rig',      function () { updateRig(dt); });
+    safeProf('led',      function () { updateLed(dt); });
+    safeProf('haze',     function () { updateHaze(dt); });
+    safeProf('confetti', function () { updateConfetti(dt); });
 
     /* rio: leve deriva das ondas */
     if (backdrop && backdrop.tex && backdrop.tex.water) {
@@ -3629,6 +3721,121 @@
       /* telao troca de modo a cada 4 compassos */
       if (led && (((i / 4) | 0) % 4 === 0)) led.mode = (led.mode + 1) % 4;
     }
+  }
+
+  /* =========================================================================
+     13.1 AQUECIMENTO E QUALIDADE
+
+     O BUG QUE ISTO CONSERTA (medido, nao suposto)
+     ---------------------------------------------
+     `shots/_perfload.html` sobre a cena gameplay_sp mostrou UM frame de
+     440 ms la pelo segundo 57 da musica, e o perfil por subsistema apontou o
+     culpado com o dedo: `led` = 439,4 ms de 440,4 ms.
+
+     Era o telao entrando pela primeira vez no modo "grafismo marajoara". O
+     `sharedCanvas('marajoara')` de `drawLed()` e preguicoso: na primeira
+     chamada o GH.Materials tinha que desenhar um atlas de 1024x1024 com os
+     16 glifos, do zero, dentro do frame. Como os modos do telao trocam a cada
+     4 compassos, isso caia SEMPRE no meio da musica.
+
+     Esse frame e maior que a janela de lookahead de 0,20 s do GH.Conductor.
+     JavaScript nao e preemptivo: o tick de 25 ms do agendador so roda quando
+     o frame acaba, a janela passa, e as notas sao agendadas com tempo ja
+     passado — o WebAudio dispara na hora e sai o estalo que o jogador ouviu.
+
+     A cura: nada nasce durante a musica. Aqui todo recurso preguicoso do
+     palco e materializado de uma vez, no aquecimento (evento 'warmup' do
+     GH.Engine, que roda no carregamento).
+     ========================================================================= */
+
+  /* Constroi AGORA tudo que o palco so pediria mais tarde. */
+  function warmup() {
+    /* 1. atlas do telao e a grade de pixel assada: o custo sai daqui e vai
+          para o carregamento, onde ninguem esta ouvindo musica ainda */
+    safe(function () { sharedCanvas('marajoara'); });
+    safe(function () { sharedTex('marajoara'); });
+    safe(function () { ledGridCanvas(); });
+
+    /* 2. os quatro modos do telao desenhados uma vez cada — assim o primeiro
+          gradiente e o primeiro drawImage de cada modo ja estao pagos antes da
+          primeira nota. */
+    if (led) {
+      var m0 = led.mode, b0 = barPos, m;
+      for (m = 0; m < 4; m++) { led.mode = m; safe(function () { drawLed(0); }); }
+
+      /* 2b. O modo TIPOGRAFIA foi medido como o pior de todos: a primeira
+             chamada de fillText com uma palavra nova obriga o motor a resolver
+             a fonte e rasterizar cada glifo inedito. Como a palavra muda a
+             cada 4 compassos, essa conta caia no meio da musica — 420 ms num
+             frame so. Desenhamos AQUI as quatro palavras, de uma vez: depois
+             disso o cache de glifos ja tem tudo que o telao vai pedir. */
+      led.mode = 3;
+      for (m = 0; m < LED_WORDS.length; m++) {
+        barPos = m * 4;                      /* seleciona a palavra m */
+        safe(function () { drawLed(0); });
+      }
+      barPos = b0;
+      led.mode = m0;
+      safe(function () { drawLed(0); });
+    }
+
+    /* 3. confete: o material so entra no render quando alguem faz 5 estrelas.
+          Uma piscada de um frame invisivel forca a compilacao junto com o
+          resto (o GH.Engine chama renderer.compile logo depois deste evento). */
+    if (confetti) confetti.mesh.visible = true;
+    return GH.Stage;
+  }
+
+  /* Chamado pelo GH.Engine assim que o aquecimento termina. */
+  function warmupDone() {
+    if (confetti && !confetti.alive) confetti.mesh.visible = false;
+  }
+
+  /* --- QUALIDADE ----------------------------------------------------------
+     Antes, o palco lia GH.Engine.qualityScale.crowd UMA vez, na hora de
+     nascer a plateia, e nunca mais. Quando a auto-degradacao por fps descia
+     de nivel, o publico continuava custando exatamente o mesmo. Agora o
+     engine empurra a mudanca e ela chega em quem gasta.
+
+     Nao removemos ninguem da plateia (isso mudaria a imagem aprovada): o que
+     cai e a FREQUENCIA com que as silhuetas distantes sao reanimadas. O
+     LOD longe ja e billboard de 2 metros a mais de 30 unidades da lente —
+     reanimar a 20 Hz em vez de 60 Hz e literalmente invisivel e devolve dois
+     tercos do laco mais quente do frame. */
+  var qCrowd = 1;          /* 1 = anima o LOD distante todo frame */
+  var qLedHz = 14;
+  function setQuality(name, scale) {
+    var s = scale || (GH.Engine && GH.Engine.qualityScale) || null;
+    var idx = s && typeof s.index === 'number' ? s.index : 2;
+    /* high/ultra animam tudo todo frame; med pula 1 em 2; low pula 2 em 3 */
+    qCrowd = (idx >= 2) ? 1 : (idx === 1 ? 2 : 3);
+    qLedHz = (idx >= 2) ? 14 : (idx === 1 ? 10 : 6);
+    if (led) led.hz = qLedHz;
+    return GH.Stage;
+  }
+
+  /* A plateia e o maior laco de CPU do palco: milhares de instancias tem
+     deslocamentos e celulares reescritos continuamente. `visible=false`
+     elimina seus draw calls; o guarda em updateCrowd elimina tambem todo o
+     trabalho por frame e os uploads de buffers. Mantemos os recursos quando
+     ela ja foi criada para religar no menu sem uma alocacao brusca. Quando a
+     pagina nasce com a opcao desligada, buildCrowd() nem chega a cria-los. */
+  function setCrowdEnabled(on) {
+    crowdEnabled = on !== false;
+    if (crowd && crowd.group) crowd.group.visible = crowdEnabled;
+    else if (crowdEnabled && inited && !disposed) safe(buildCrowd);
+    if (!crowdEnabled && profOn) prof.crowd = 0;
+    return GH.Stage;
+  }
+
+  function hookEngine() {
+    var E = GH.Engine;
+    if (!E || typeof E.on !== 'function') return;
+    E.on('warmup', function () { safe(warmup); });
+    E.on('warmedup', function () { safe(warmupDone); });
+    /* pega a qualidade que ja vale agora (o engine pode ter degradado antes
+       de o palco existir) */
+    safe(function () { setQuality(E.quality, E.qualityScale); });
   }
 
   /* --- API publica --------------------------------------------------------- */
@@ -3721,6 +3928,12 @@
     for (i = 0; i < ownedTex.length; i++) { try { ownedTex[i].dispose(); } catch (e) {} }
     ownedGeo.length = 0; ownedMat.length = 0; ownedTex.length = 0;
     backdropCache = {};
+    /* O gradiente da vinheta pertence ao CONTEXTO 2D do telao que acaba de
+       morrer; se o palco for remontado, ele tem que nascer de novo no
+       contexto novo. A grade assada e so um canvas, mas some junto por
+       simetria — quem reconstroi o palco reconstroi tudo. */
+    ledVig = null;
+    ledGrid = null;
     backdrop = crowd = stageBuild = band = led = rig = haze = confetti = stageLights = null;
     group = null;
     inited = false;
@@ -3730,8 +3943,10 @@
 
   function stats() {
     return {
-      crowd: crowd ? crowd.count : 0,
-      phones: (crowd && crowd.phones) ? crowd.phones.list.length : 0,
+      crowdEnabled: crowdEnabled,
+      crowd: (crowdEnabled && crowd) ? crowd.count : 0,
+      crowdAllocated: crowd ? crowd.count : 0,
+      phones: (crowdEnabled && crowd && crowd.phones) ? crowd.phones.list.length : 0,
       band: band ? band.members.length : 0,
       movingHeads: rig ? rig.heads.length : 0,
       pattern: rig ? rig.pattern : '-',
@@ -3743,6 +3958,7 @@
       geometries: ownedGeo.length,
       materials: ownedMat.length,
       textures: ownedTex.length,
+      perfil: profOn ? prof : null,
       errors: log.slice()
     };
   }
@@ -3757,6 +3973,9 @@
     cameraRig: cameraRig,
 
     setTheme: setTheme,
+    setQuality: setQuality,
+    setCrowdEnabled: setCrowdEnabled,
+    warmup: warmup,
     setIntensity: setIntensity,
     setStarPower: setStarPower,
     beat: beat,
@@ -3766,6 +3985,9 @@
     setVisible: setVisible,
 
     stats: stats,
+    /* liga/desliga o perfil por subsistema (ver safeProf) */
+    get profile() { return profOn; },
+    set profile(v) { profOn = !!v; },
     get inited() { return inited; },
     get intensity() { return intensitySmooth; },
     get themeName() { return themeId; }

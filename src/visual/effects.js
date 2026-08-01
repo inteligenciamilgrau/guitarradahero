@@ -92,6 +92,42 @@
   var QUALITY_SCALE = { low: 0.42, med: 0.68, high: 1.0, ultra: 1.22 };
   var qScale = 1.0;
 
+  /* --- FILA DE EMISSAO AMORTIZADA ------------------------------------------
+     Alguns eventos nascem enormes num frame so: ativar star power dispara ~90
+     faiscas de rastro + aneis + coluna + flare TUDO junto, e a comemoracao
+     idem. Um frame gordo desses e o que atrasa o tick do agendador de audio
+     (setInterval de 25 ms, janela de 0,20 s, mesma thread do rAF) e faz a
+     musica estalar.
+
+     A cura nao e emitir menos — e emitir ao longo de alguns frames. A 60 fps,
+     espalhar por 4 frames sao 67 ms: o olho le como um jorro, nao como um
+     degrau. O visual continua o mesmo; some so o degrau de custo.           */
+  var burstQ = [];          /* [{ left, per, fn }] */
+  var BURST_FRAMES = 4;     /* em quantos frames um jorro se espalha */
+
+  function emitBurst(count, fn) {
+    var n = Math.max(0, Math.round(count));
+    if (n <= 0) return;
+    /* a primeira leva sai AGORA: o feedback nunca pode chegar atrasado */
+    var per = Math.max(1, Math.ceil(n / BURST_FRAMES));
+    var first = Math.min(n, per);
+    for (var i = 0; i < first; i++) if (fn(i, n) === false) return;
+    if (n > first) burstQ.push({ i: first, left: n - first, total: n, per: per, fn: fn });
+  }
+
+  function drainBursts() {
+    if (!burstQ.length) return;
+    for (var b = burstQ.length - 1; b >= 0; b--) {
+      var job = burstQ[b];
+      var k = Math.min(job.per, job.left);
+      for (var j = 0; j < k; j++) {
+        if (job.fn(job.i++, job.total) === false) { job.left = 0; break; }
+        job.left--;
+      }
+      if (job.left <= 0) { burstQ[b] = burstQ[burstQ.length - 1]; burstQ.pop(); }
+    }
+  }
+
   /* Estado dinamico */
   var st = {
     spOn: false,          /* star power pedido */
@@ -629,7 +665,7 @@
      5. CAMPO DE POEIRA (atmosfera)
      ========================================================================= */
 
-  var dust = { points: null, mat: null, geo: null, boxY: 8.5 };
+  var dust = { points: null, mat: null, geo: null, count: 0, boxY: 8.5 };
 
   function buildDust() {
     var count = Math.round(1250 * qScale);
@@ -686,6 +722,7 @@
     group.add(pts);
 
     dust.points = pts; dust.mat = mat; dust.geo = geo;
+    dust.count = count;
   }
 
   /* =========================================================================
@@ -1516,26 +1553,28 @@
         setCol(p, C.spCore, 3.2, C.spGlow, 0.5);
       }
 
-      /* --- explosao de faiscas prateadas --- */
-      var n = Math.round(90 * qScale);
-      for (i = 0; i < n; i++) {
-        p = spawn(bTrail);
-        if (!p) break;
+      /* --- explosao de faiscas prateadas ---
+         Amortizada (ver emitBurst): mesma quantidade, espalhada por 4 frames.
+         Era o maior jorro de frame unico do jogo inteiro. */
+      emitBurst(90 * qScale, function () {
+        var p2 = spawn(bTrail);
+        if (!p2) return false;
         var ang = rrange(0, TAU);
         var sp2 = rrange(3.0, 12.5);
-        p.x = rrange(-HALF_W, HALF_W) * 0.55;
-        p.y = FX_Y + rrange(0.02, 0.3);
-        p.z = STRIKE_Z + rrange(-0.4, 0.4);
-        p.vx = mCos(ang) * sp2;
-        p.vy = mAbs(mSin(ang)) * sp2 * 0.8 + rrange(1.5, 5);
-        p.vz = rrange(-1.5, 4.5);
-        p.gy = -8.5; p.drag = 1.8;
-        p.life = rrange(0.5, 1.3);
-        p.sz0 = rrange(0.15, 0.28); p.sz1 = p.sz0 * 0.25; p.szEase = 0;
-        p.asp = 0.20; p.stretch = 0.052; p.align = 1;
-        p.a0 = 1; p.fout = 0.6;
-        setCol(p, C.spCore, 3.2, C.spGlow, 0.4);
-      }
+        p2.x = rrange(-HALF_W, HALF_W) * 0.55;
+        p2.y = FX_Y + rrange(0.02, 0.3);
+        p2.z = STRIKE_Z + rrange(-0.4, 0.4);
+        p2.vx = mCos(ang) * sp2;
+        p2.vy = mAbs(mSin(ang)) * sp2 * 0.8 + rrange(1.5, 5);
+        p2.vz = rrange(-1.5, 4.5);
+        p2.gy = -8.5; p2.drag = 1.8;
+        p2.life = rrange(0.5, 1.3);
+        p2.sz0 = rrange(0.15, 0.28); p2.sz1 = p2.sz0 * 0.25; p2.szEase = 0;
+        p2.asp = 0.20; p2.stretch = 0.052; p2.align = 1;
+        p2.a0 = 1; p2.fout = 0.6;
+        setCol(p2, C.spCore, 3.2, C.spGlow, 0.4);
+        return true;
+      });
 
       /* --- coluna central de energia --- */
       p = spawn(bGlow);
@@ -1554,11 +1593,9 @@
       eng('bloomPulse', 0.55, 1.9);
     } else {
       /* --- dissipacao: a energia se solta e sobe --- */
-      var k, q;
-      var nOut = Math.round(70 * qScale);
-      for (k = 0; k < nOut; k++) {
-        q = spawn(bSpark);
-        if (!q) break;
+      emitBurst(70 * qScale, function () {
+        var q = spawn(bSpark);
+        if (!q) return false;
         q.x = rrange(-HALF_W - 0.4, HALF_W + 0.4);
         q.y = SURFACE_Y + rrange(0.05, 2.2);
         q.z = rrange(-16, 3);
@@ -1571,7 +1608,8 @@
         q.rot = rrange(0, TAU); q.rotV = rsign() * rrange(1, 4);
         q.a0 = 0.9; q.fin = 0.04; q.fout = 0.7;
         setCol(q, C.spCore, 2.4, C.spEdge, 0.2);
-      }
+        return true;
+      });
       st.waveT = -1;
       aura.wave.visible = false;
       eng('bloomPulse', 0.28, 2.4);
@@ -1834,23 +1872,24 @@
       setCol(p, mixC(C.white, col, 0.25).clone(), 2.6, col, 0.3);
     }
 
-    var n = Math.round((22 + 44 * k) * qScale);
-    for (i = 0; i < n; i++) {
-      p = spawn(bTrail);
-      if (!p) break;
+    /* jorro da comemoracao, tambem amortizado em 4 frames */
+    emitBurst((22 + 44 * k) * qScale, function () {
+      var p2 = spawn(bTrail);
+      if (!p2) return false;
       var ang = rrange(0, TAU);
       var speed = rrange(3.5, 10 + 6 * k);
-      p.x = rrange(-0.6, 0.6); p.y = FX_Y + 0.1; p.z = STRIKE_Z;
-      p.vx = mCos(ang) * speed;
-      p.vy = mAbs(mSin(ang)) * speed * 0.75 + rrange(1.5, 5.5);
-      p.vz = rrange(-1, 4);
-      p.gy = -10.5; p.drag = 1.9;
-      p.life = rrange(0.45, 1.1);
-      p.sz0 = rrange(0.14, 0.25); p.sz1 = p.sz0 * 0.25; p.szEase = 0;
-      p.asp = 0.20; p.stretch = 0.055; p.align = 1;
-      p.a0 = 1; p.fout = 0.6;
-      setCol(p, mixC(C.white, col, rrange(0, 0.5)).clone(), 3.0, col, 0.25);
-    }
+      p2.x = rrange(-0.6, 0.6); p2.y = FX_Y + 0.1; p2.z = STRIKE_Z;
+      p2.vx = mCos(ang) * speed;
+      p2.vy = mAbs(mSin(ang)) * speed * 0.75 + rrange(1.5, 5.5);
+      p2.vz = rrange(-1, 4);
+      p2.gy = -10.5; p2.drag = 1.9;
+      p2.life = rrange(0.45, 1.1);
+      p2.sz0 = rrange(0.14, 0.25); p2.sz1 = p2.sz0 * 0.25; p2.szEase = 0;
+      p2.asp = 0.20; p2.stretch = 0.055; p2.align = 1;
+      p2.a0 = 1; p2.fout = 0.6;
+      setCol(p2, mixC(C.white, col, rrange(0, 0.5)).clone(), 3.0, col, 0.25);
+      return true;
+    });
 
     crowdReaction(k > 0.45 ? 'ecstatic' : 'streak');
     st.hitLightE = mMax(st.hitLightE, 11 + 6 * k);
@@ -2133,6 +2172,8 @@
       dust.mat.uniforms.uSp.value = st.spAmt;
     }
 
+    drainBursts();
+
     for (var i = 0; i < batches.length; i++) updateBatch(batches[i], dt);
   }
 
@@ -2143,6 +2184,7 @@
   function reset() {
     if (!inited) return;
     var i, b;
+    burstQ.length = 0;      /* jorro pendente de outra musica nao vaza pra ca */
     for (i = 0; i < batches.length; i++) {
       b = batches[i];
       while (b.parts.length) b.free.push(b.parts.pop());
@@ -2211,11 +2253,79 @@
      24. QUALIDADE E TEMA
      ========================================================================= */
 
-  function setQuality(q) {
-    var s = QUALITY_SCALE[q];
-    qScale = (typeof s === 'number') ? s : 1.0;
+  /* DEGRADACAO QUE CHEGA AQUI DE VERDADE.
+     Antes isto so era chamado uma vez, no init(): quando o GH.Engine baixava
+     a qualidade sozinho por fps ruim, nao saia UMA particula da tela. Agora o
+     engine empurra a mudanca (pushQualityToSubsystems) e passa junto a tabela
+     GH.Engine.qualityScale, que e a fonte da verdade — `particles` ja vem
+     calibrado por nivel. O nome continua aceito para compatibilidade. */
+  function setQuality(q, scale) {
+    var s = (scale && typeof scale.particles === 'number') ? scale.particles : QUALITY_SCALE[q];
+    qScale = (typeof s === 'number' && isFinite(s)) ? clamp(s, 0.15, 1.6) : 1.0;
     if (dust.mat) dust.mat.uniforms.uSize.value = 4.4 * (qScale > 1 ? 1.1 : 1);
+    /* poeira: o campo e um Points unico, entao "menos poeira" e desenhar
+       menos vertices do MESMO buffer — sem realocar nada. */
+    if (dust.geo && dust.count) {
+      dust.geo.setDrawRange(0, Math.max(180, Math.round(dust.count * clamp(qScale, 0.25, 1))));
+    }
     return qScale;
+  }
+
+  /* --- AQUECIMENTO ---------------------------------------------------------
+     Medido em shots/_perfload.html: dois programas GLSL de MeshBasicMaterial
+     so eram compilados na primeira vez que o jogador ERRAVA uma nota — porque
+     o escurecimento de raia e a fumaca escura ficam `visible = false` ate la,
+     e o `renderer.compile` do three nao cobre todas as variantes de um
+     material que nunca passou pelo render de verdade.
+
+     Compilar shader trava a thread principal por dezenas ou centenas de
+     milissegundos no driver. Cair isso no primeiro erro do jogador — ou seja,
+     no pior momento possivel — era exatamente o estalo relatado.
+
+     Aqui deixamos TUDO visivel por um frame (o frame de aquecimento do
+     GH.Engine, que roda no carregamento) e devolvemos o estado depois. */
+  var warmSaved = null;
+  function warmup() {
+    if (!inited) return GH.FX;
+    warmSaved = [];
+    var i, b;
+    for (i = 0; i < batches.length; i++) {
+      b = batches[i];
+      warmSaved.push({ o: b.mesh, v: b.mesh.visible, c: b.geometry.instanceCount });
+      b.mesh.visible = true;
+      /* uma instancia basta para o material passar pelo render */
+      if (b.geometry.instanceCount < 1) b.geometry.instanceCount = 1;
+    }
+    var extras = [aura.floor, aura.railL, aura.railR, aura.canopy, aura.wave];
+    for (i = 0; i < extras.length; i++) {
+      if (!extras[i]) continue;
+      warmSaved.push({ o: extras[i], v: extras[i].visible, c: -1 });
+      extras[i].visible = true;
+    }
+    for (i = 0; i < laneDim.length; i++) {
+      warmSaved.push({ o: laneDim[i].mesh, v: laneDim[i].mesh.visible, c: -1 });
+      laneDim[i].mesh.visible = true;
+    }
+    return GH.FX;
+  }
+
+  function warmupDone() {
+    if (!warmSaved) return GH.FX;
+    for (var i = 0; i < warmSaved.length; i++) {
+      var s = warmSaved[i];
+      s.o.visible = s.v;
+      if (s.c >= 0 && s.o.geometry) s.o.geometry.instanceCount = s.c;
+    }
+    warmSaved = null;
+    return GH.FX;
+  }
+
+  function hookEngine() {
+    var E = GH.Engine;
+    if (!E || typeof E.on !== 'function') return;
+    E.on('warmup', function () { try { warmup(); } catch (e) { /* nunca derruba o boot */ } });
+    E.on('warmedup', function () { try { warmupDone(); } catch (e) { /* ok */ } });
+    try { setQuality(E.quality, E.qualityScale); } catch (e) { /* ok */ }
   }
 
   /* Reaplica as cores quando o tema muda (o menu pode trocar de musica). */
@@ -2267,7 +2377,7 @@
     _f2 = new THREE.Color(1, 1, 1);
     resolveColors();
 
-    try { setQuality(GH.Engine ? GH.Engine.quality : 'high'); } catch (e) { qScale = 1; }
+    try { setQuality(GH.Engine ? GH.Engine.quality : 'high', GH.Engine ? GH.Engine.qualityScale : null); } catch (e) { qScale = 1; }
 
     group = new THREE.Group();
     group.name = 'GH_FX';
@@ -2279,6 +2389,8 @@
     buildDust();
     buildAura();
     buildLights();
+
+    try { hookEngine(); } catch (e) { /* engine sem eventos: segue sem aquecimento */ }
 
     /* segue a troca de tema da paleta sem que ninguem precise avisar */
     try { if (GH.Palette && GH.Palette.onChange) GH.Palette.onChange(setTheme); } catch (e) { /* ok */ }
@@ -2329,6 +2441,7 @@
     setStarPower: starPower,
     setIntensity: setIntensity,
     setQuality: setQuality,
+    warmup: warmup,
     setTheme: setTheme,
     dispose: dispose,
     stats: stats,

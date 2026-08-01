@@ -43,13 +43,14 @@ faz toda a diferença.
 - **6 músicas originais**, compostas proceduralmente em 6 gêneros brasileiros:
   guitarrada, carimbó, lambada, brega, frevo e samba-rock.
 - **4 dificuldades** por música — a mais difícil se chama **Guitarrada**.
-- **Toda a trilha é sintetizada em tempo real** no WebAudio: guitarra com
-  distorção valvulada, wah, tremolo e delay slapback; baixo; bateria;
-  percussão brasileira (curimbó, ganzá, agogô, triângulo, pandeiro); órgão e
-  naipe de metais. Não existe um único arquivo de áudio no projeto.
-- **Todas as texturas são desenhadas em canvas 2D em tempo de execução** —
+- **Toda a trilha é composta e sintetizada proceduralmente** no WebAudio:
+  guitarra com distorção valvulada, wah, tremolo e delay slapback; baixo;
+  bateria; percussão brasileira; órgão e naipe de metais. Um gerador offline
+  preserva esses timbres em três stems sincronizados (`backing`, `drums` e
+  `guitar`), evitando milhares de nós de áudio durante a partida.
+- **Todas as texturas da cena são desenhadas em canvas 2D em tempo de execução** —
   madeira, metal escovado, fibra de carbono, grafismo marajoara, azulejaria.
-  Não existe um único arquivo de imagem no projeto.
+  O único bitmap de interface é o favicon.
 - Palco com público instanciado, rig de luz com cones volumétricos, telão de
   LED reativo, fumaça e cenário amazônico.
 - Mecânicas completas do gênero: acordes, HOPO, tap notes, sustains, notas
@@ -66,20 +67,30 @@ disco e o que torna o deploy no Pages trivial.
 
 ```
 index.html          shell + ordem de carregamento
+favicon.png         ícone do navegador
 src/core/           util, paleta, engine (render + post-processing), input
 src/visual/         materiais procedurais, pista, notas, efeitos, palco
-src/audio/          grafo de áudio, síntese musical, maestro (relógio)
+src/audio/          grafo, síntese, stems e maestro (relógio)
 src/content/        músicas e charts
 src/gameplay/       chart, pontuação, máquina de estados
 src/ui/             HUD e menus
+tools/generate-*    gerador offline de stems para músicas atuais e futuras
 vendor/             Three.js r147 + EffectComposer / Bloom / SMAA
 ```
 
-Este repositório contém **apenas o que o jogo precisa para rodar**. As
-ferramentas de desenvolvimento (captura headless para avaliação visual, lint,
-testes de input, comparação A/B) e a documentação interna de arquitetura ficam
-fora — o jogo não tem etapa de build, então nada disso é necessário para jogar
-nem para hospedar.
+Os WAVs ficam em `assets/audio/<song-id>/` e são derivados reproduzíveis que
+somam centenas de megabytes, por isso não entram no Git. Para gerar ou regerar
+uma música no Windows, com Edge ou Chrome instalado:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\generate-stems.ps1 -SongId frevo-de-aco -Stem all
+```
+
+O script atualiza o manifesto somente depois que `backing.wav`, `drums.wav` e
+`guitar.wav` foram concluídos e validados. Se os arquivos não estiverem
+presentes, o jogo continua funcionando pelo sintetizador procedural de fallback.
+As demais ferramentas de desenvolvimento e a documentação interna continuam
+fora do repositório.
 
 Um detalhe de implementação que vale contar: como não há build nem servidor, o
 carregamento é `<script>` clássico com `window.GH` como namespace, e cada módulo
