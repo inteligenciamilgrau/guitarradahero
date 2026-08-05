@@ -366,6 +366,23 @@
     }
   }
 
+  /* Persiste a ultima musica/dificuldade escolhida para restaurar apos reload. */
+  function saveLastChoice(s, d) {
+    try {
+      if (!s) return;
+      var id = (typeof s === 'object') ? s.id : String(s);
+      if (!id) return;
+      if (GH.Settings && typeof GH.Settings.set === 'function') {
+        GH.Settings.set('lastSongId', id);
+        GH.Settings.set('lastDifficulty', d || '');
+      } else if (GH.Settings) {
+        GH.Settings.lastSongId = id;
+        GH.Settings.lastDifficulty = d || '';
+        if (typeof GH.Settings.save === 'function') GH.Settings.save();
+      }
+    } catch (e) { /* ok */ }
+  }
+
   /* =========================================================================
      5. CAPAS DE DISCO PROCEDURAIS
      Cada musica tem `cover:{hue,hue2,motif,subtitle}` em GH.Songs. A partir
@@ -2026,6 +2043,7 @@
       paintHero(song, true);
       /* o tema cromatico do palco acompanha a musica em foco */
       if (song && song.palette) call('Palette', 'setTheme', song.palette);
+      saveLastChoice(song, selectedDifficulty);
     };
 
     s.onEnter = function () {
@@ -2273,7 +2291,10 @@
       revealList(els, { delay: 0.10, step: 0.07, dur: 0.55, dy: 30, scale: 0.94 });
       revealList([foot], { delay: 0.38, dur: 0.5, dy: 12 });
     };
-    s.onFocus = function (it, i) { selectedDifficulty = DIFF_ORDER[i] || 'medio'; };
+    s.onFocus = function (it, i) {
+      selectedDifficulty = DIFF_ORDER[i] || 'medio';
+      saveLastChoice(currentSong(), selectedDifficulty);
+    };
     s.onBack = function () { emitChoose('songselect'); };
     s.built = true;
     return s;
@@ -2935,9 +2956,17 @@
       if (!s._chartJob()) pendingLayout.push(s._chartJob);
     };
 
+    s.onFocus = function (it, i) {
+      try { setSetting('lastResultsIndex', i); } catch (e) { /* ok */ }
+    };
+
     s.onEnter = function (stats) {
       s.fill(stats);
-      setFocus(s, 0, false);
+      var failed = !!(stats && stats.failed);
+      var defaultIdx = failed ? 1 : 0;
+      var idx = setting('lastResultsIndex', defaultIdx);
+      if (typeof idx !== 'number' || idx < 0 || idx >= s.items.length) idx = defaultIdx;
+      setFocus(s, idx, false);
       revealList([top], { delay: 0.02, dur: 0.5, dy: -16 });
       revealList([banner], { delay: 1.70, dur: 0.6, dy: 14, scale: 0.9 });
       revealList([scorePanel], { delay: 0.22, dur: 0.55, dy: 20, dx: -18 });
@@ -3413,6 +3442,7 @@
       if (GH.Settings) {
         if (path.indexOf('volumes.') === 0) GH.Settings.volumes[path.slice(8)] = value;
         else GH.Settings[path] = value;
+        if (typeof GH.Settings.save === 'function') GH.Settings.save();
       }
     } catch (e) { /* ok */ }
   }
@@ -4144,6 +4174,17 @@
       var pref = setting('difficulty', 'medio');
       if (DIFF_INFO[pref]) selectedDifficulty = pref;
     } catch (e) { /* ok */ }
+    /* Restaura ultima musica e dificuldade escolhida (lembrar ultima fase). */
+    try {
+      var lastId = setting('lastSongId', '');
+      var lastDiff = setting('lastDifficulty', '');
+      if (lastId) {
+        for (var _li = 0; _li < songList.length; _li++) {
+          if (songList[_li] && songList[_li].id === lastId) { selectedSongIdx = _li; break; }
+        }
+      }
+      if (lastDiff && DIFF_INFO[lastDiff]) selectedDifficulty = lastDiff;
+    } catch (e2) { /* ok */ }
 
     buildTitle();
     buildSongSelect();

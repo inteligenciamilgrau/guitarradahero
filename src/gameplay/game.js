@@ -288,6 +288,18 @@
           mcall('Engine', 'flash', paletteHex('gold', '#ffcf4a'), 0.30, 0.7);
           mcall('Engine', 'bloomPulse', 0.5, 1.6);
         }
+        /* Bloqueio de input: o jogador pode estar em desespero ainda apertando
+           botoes quando a tela de resultados abre. Sem isso, um Enter ou seta
+           pressionado na agonia final sai imediatamente para o titulo antes de
+           a pessoa ver a pontuacao. Desabilitamos tudo por 1.2s e reabilitamos
+           so depois que a animacao de entrada ja assentou. */
+        if (!capture) {
+          mcall('Input', 'setEnabled', false);
+          var self = this;
+          setTimeout(function () {
+            try { mcall('Input', 'setEnabled', true); } catch (e) { /* ok */ }
+          }, 1200);
+        }
       }
     },
 
@@ -401,6 +413,18 @@
 
     GH.Game.song = song;
     GH.Game.difficulty = difficulty;
+    try {
+      if (GH.Settings) {
+        if (typeof GH.Settings.set === 'function') {
+          GH.Settings.set('lastSongId', song.id);
+          GH.Settings.set('lastDifficulty', difficulty);
+        } else {
+          GH.Settings.lastSongId = song.id;
+          GH.Settings.lastDifficulty = difficulty;
+          if (typeof GH.Settings.save === 'function') GH.Settings.save();
+        }
+      }
+    } catch (e) { /* ok */ }
 
     /* tema cromatico da musica */
     if (song.palette) mcall('Palette', 'setTheme', song.palette);
@@ -1427,10 +1451,12 @@
     if (mhas('Menus', 'onChoose')) mcall('Menus', 'onChoose', onMenuChoose);
 
     /* --- musica/dificuldade padrao --- */
-    song = resolveSong(null);
+    var savedSongId = null;
+    try { if (GH.Settings && GH.Settings.lastSongId) savedSongId = GH.Settings.lastSongId; } catch (e) { savedSongId = null; }
+    song = resolveSong(savedSongId);
     GH.Game.song = song;
     var savedDiff = null;
-    try { if (GH.Settings && GH.Settings.difficulty) savedDiff = GH.Settings.difficulty; } catch (e) { savedDiff = null; }
+    try { if (GH.Settings && (GH.Settings.lastDifficulty || GH.Settings.difficulty)) savedDiff = GH.Settings.lastDifficulty || GH.Settings.difficulty; } catch (e) { savedDiff = null; }
     difficulty = resolveDifficulty(savedDiff || 'medio');
     GH.Game.difficulty = difficulty;
 
@@ -1487,12 +1513,22 @@
       song = resolveSong(s) || song;
       GH.Game.song = song;
       if (song && song.palette) mcall('Palette', 'setTheme', song.palette);
+      try {
+        if (GH.Settings && typeof GH.Settings.set === 'function') {
+          GH.Settings.set('lastSongId', song.id);
+        }
+      } catch (e) { /* ok */ }
       return song;
     },
     setDifficulty: function (d) {
       difficulty = resolveDifficulty(d);
       GH.Game.difficulty = difficulty;
-      try { if (GH.Settings) GH.Settings.difficulty = difficulty; } catch (e) { /* ok */ }
+      try {
+        if (GH.Settings && typeof GH.Settings.set === 'function') {
+          GH.Settings.set('difficulty', difficulty);
+          GH.Settings.set('lastDifficulty', difficulty);
+        }
+      } catch (e) { /* ok */ }
       return difficulty;
     },
     songs: function () { return GH.Songs || []; },

@@ -58,6 +58,7 @@
   /* Tamanho do historico curto de eventos (deteccao de HOPO/tap, debug, replay). */
   var HISTORY_MAX = 96;
 
+
   /* --------------------------------------------------------------------------
    * Configuracoes globais — merge NAO destrutivo.
    * GH.Settings nao tem dono declarado no contrato; varios modulos leem dele.
@@ -69,6 +70,148 @@
   if (typeof GH.Settings.scrollSpeed !== 'number') GH.Settings.scrollSpeed = 14;
   if (typeof GH.Settings.noFail !== 'boolean') GH.Settings.noFail = false;
   if (typeof GH.Settings.invertStrum !== 'boolean') GH.Settings.invertStrum = false;
+
+  /* --------------------------------------------------------------------------
+   * Persistencia de configuracoes — localStorage, defensivo como sempre.
+   * Chave separada dos bindings para nao misturar leituras.
+   * As configuracoes de CAPTURA sao ignoradas (o main.js sobrescreve depois
+   * de chamar loadSettings, entao captura segue deterministica).
+   * ------------------------------------------------------------------------*/
+  var SETTINGS_KEY = 'gh.settings.v1';
+
+  /* Chaves permitidas e seus tipos esperados (seguranca: nao deixamos texto
+   * arbitrario do localStorage entrar como booleano ou numero). */
+  var SETTINGS_SCHEMA = {
+    audioOffsetMs: 'number', videoOffsetMs: 'number',
+    scrollSpeed: 'number',
+    noFail: 'boolean', invertStrum: 'boolean', lefty: 'boolean',
+    hitFlash: 'boolean', showFPS: 'boolean', crowd3D: 'boolean',
+    crowdAmbience: 'boolean',
+    quality: 'string', reverbIR: 'string',
+    /* Selecao de musica, dificuldade e escolha de tela de resultados (lembrar ultima escolha). */
+    lastSongId: 'string', lastDifficulty: 'string', lastResultsIndex: 'number',
+    /* Volumes: objeto simples de chave:number. Guardamos o subobjeto. */
+    volumes: 'object'
+  };
+
+  var settingsChangeHandlers = [];
+
+  /* Funcao `set` — muda um valor E notifica ouvintes E persiste.
+   * Esta e a unica forma de mudar configuracoes que garante persistencia.
+   * Menus.setSetting ja chama esta funcao se ela existir. */
+  if (typeof GH.Settings.set !== 'function') {
+    GH.Settings.set = function (path, value) {
+      try {
+        if (path.indexOf('volumes.') === 0) {
+          if (!GH.Settings.volumes || typeof GH.Settings.volumes !== 'object') GH.Settings.volumes = {};
+          GH.Settings.volumes[path.slice(8)] = value;
+        } else {
+          GH.Settings[path] = value;
+        }
+        for (var i = 0; i < settingsChangeHandlers.length; i++) {
+          try { settingsChangeHandlers[i](GH.Settings, path); } catch (eh) { /* ok */ }
+        }
+        GH.Settings.save();
+      } catch (e) { /* ok */ }
+    };
+  }
+
+  if (typeof GH.Settings.onChange !== 'function') {
+    GH.Settings.onChange = function (fn) {
+      if (typeof fn === 'function' && settingsChangeHandlers.indexOf(fn) < 0)
+        settingsChangeHandlers.push(fn);
+    };
+  }
+
+  if (typeof GH.Settings.save !== 'function') {
+    GH.Settings.save = function () {
+      try {
+        if (!window.localStorage) return false;
+        var out = {};
+        var k;
+        for (k in SETTINGS_SCHEMA) {
+          if (!Object.prototype.hasOwnProperty.call(SETTINGS_SCHEMA, k)) continue;
+          if (k === 'volumes') {
+            if (GH.Settings.volumes && typeof GH.Settings.volumes === 'object')
+              out.volumes = GH.Settings.volumes;
+          } else if (GH.Settings[k] !== undefined) {
+            out[k] = GH.Settings[k];
+          }
+        }
+        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(out));
+        return true;
+      } catch (e) { return false; }
+    };
+  }
+
+  if (typeof GH.Settings.load !== 'function') {
+    GH.Settings.load = function () {
+      try {
+        if (!window.localStorage) return false;
+        var raw = window.localStorage.getItem(SETTINGS_KEY);
+        if (!raw) return false;
+        var obj = JSON.parse(raw);
+        if (!obj || typeof obj !== 'object') return false;
+        var k;
+        for (k in SETTINGS_SCHEMA) {
+          if (!Object.prototype.hasOwnProperty.call(SETTINGS_SCHEMA, k)) continue;
+          if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+          var expected = SETTINGS_SCHEMA[k];
+          var val = obj[k];
+          if (k === 'volumes') {
+            /* volumes e um subobjeto: so aceitamos pares chave:number */
+            if (val && typeof val === 'object') {
+              GH.Settings.volumes = GH.Settings.volumes || {};
+              var vk;
+              for (vk in val) {
+                if (!Object.prototype.hasOwnProperty.call(val, vk)) continue;
+                var n = Number(val[vk]);
+                if (isFinite(n) && n >= 0 && n <= 1) GH.Settings.volumes[vk] = n;
+              }
+            }
+          } else if (expected === 'number') {
+            var nv = Number(val);
+            if (isFinite(nv)) GH.Settings[k] = nv;
+          } else if (expected === 'boolean') {
+            GH.Settings[k] = !!val;
+          } else if (expected === 'string') {
+            /* So aceitamos strings curtas sem caracteres perigosos */
+            var sv = String(val);
+            if (sv.length <= 64 && /^[\w\-. ]*$/.test(sv)) GH.Settings[k] = sv;
+          }
+        }
+        return true;
+      } catch (e) { return false; }
+    };
+  }
+
+  if (typeof GH.Settings.reset !== 'function') {
+    GH.Settings.reset = function () {
+      GH.Settings.audioOffsetMs = 0;
+      GH.Settings.videoOffsetMs = 0;
+      GH.Settings.scrollSpeed = 14;
+      GH.Settings.noFail = false;
+      GH.Settings.invertStrum = false;
+      GH.Settings.lefty = false;
+      GH.Settings.hitFlash = true;
+      GH.Settings.showFPS = false;
+      GH.Settings.crowd3D = true;
+      GH.Settings.crowdAmbience = true;
+      GH.Settings.quality = 'high';
+      GH.Settings.reverbIR = 'clube';
+      GH.Settings.volumes = {};
+      /* Nao apaga lastSongId/lastDifficulty — o jogador nao quer perder a posicao. */
+      GH.Settings.save();
+    };
+  }
+
+  /* Carrega imediatamente (merge nao-destrutivo: so preenche o que falta). */
+  (function () {
+    if (window.__GH_CAP) return; /* modo captura: determinismo total */
+    try { GH.Settings.load(); } catch (e) { /* sem localStorage: ok */ }
+  })();
+
+
 
   /* --------------------------------------------------------------------------
    * Bindings padrao. Um codigo de tecla pode disparar VARIAS acoes
@@ -772,7 +915,11 @@
       if (inited) { this.ready = true; return this; }
       inited = true;
 
-      rebuildCodeMap();
+      if (typeof window !== 'undefined' && !window.__GH_CAP) {
+        this.loadBindings();
+      } else {
+        rebuildCodeMap();
+      }
 
       hKeyDown = function (e) { onKeyDown(e); };
       hKeyUp = function (e) { onKeyUp(e); };
@@ -970,7 +1117,7 @@
         if (!raw) return false;
         var obj = JSON.parse(raw), k, i, list, clean;
         if (!obj || typeof obj !== 'object') return false;
-        var CODE_RE = /^[A-Za-z0-9]{1,32}$/;
+        var CODE_RE = /^[A-Za-z0-9_\-]{1,64}$/;
         for (k in obj) {
           if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
           if (!Object.prototype.hasOwnProperty.call(DEFAULT_BINDINGS, k)) continue;
@@ -1049,5 +1196,11 @@
    * Campo simples (nao getter) porque e lido no loop quente. */
 
   GH.Input = API;
+
+  /* Carrega os atalhos de teclado salvos imediatamente. */
+  (function () {
+    if (typeof window !== 'undefined' && window.__GH_CAP) return;
+    try { API.loadBindings(); } catch (e) { /* ok */ }
+  })();
 
 })(window.GH = window.GH || {});
