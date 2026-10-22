@@ -97,6 +97,14 @@
   var TUT_HOLD        = 6.4;    // segundos de musica com o texto cheio
   var TUT_END         = 8.0;    // fim da janela (~8 s, como pedido)
 
+  /* Dancarina de carimbo sobre o aro enquanto o traste segura a nota longa:
+     sprite sheet de 8 quadros 1:1 numa linha (um giro completo da saia). */
+  var DANCER_SRC      = 'assets/img/dancarina.webp';   /* WebP com alfa (ffmpeg) */
+  var DANCER_FRAMES   = 8;
+  var DANCER_FPS      = 11;
+  var DANCER_H        = 15;     // altura na tela, em vh (quadro quadrado)
+  var DANCER_FOOT     = 5;      // pes abaixo de laneY, em vh: em cima do aro
+
   var SECTION_POP     = 1.9;    // duracao do destaque do nome da secao
   var MILESTONE_LIFE  = 1.6;
   var COUNT_LIFE      = 0.95;
@@ -375,6 +383,34 @@
     'font-size:clamp(10px,2.0vmin,26px);letter-spacing:.05em;color:#fff;',
     'text-shadow:0 1px 0 rgba(0,0,0,.95),0 0 1.8vmin var(--ghh-gold),0 0 4vmin rgba(255,140,40,.8)}',
 
+    /* =============================================== NOTA LONGA SEGURADA */
+    /* Dancarina em pe sobre o aro (o pe na linha do aro, escala a partir dele). */
+    '#gh-hud .ghh-dancers{position:absolute;inset:0}',
+    '#gh-hud .ghh-dancer{position:absolute;left:0;top:0;width:' + DANCER_H + 'vh;height:' + DANCER_H + 'vh;opacity:0;',
+    'transform-origin:50% 100%;will-change:transform,opacity;',
+    'background:url(' + DANCER_SRC + ') 0 0/' + (DANCER_FRAMES * 100) + '% 100% no-repeat;',
+    'filter:drop-shadow(0 .5vh .7vh rgba(0,0,0,.6))}',
+    /* Fumaca de pontos: sobe do aro, na cor da raia, enquanto segura. */
+    '#gh-hud .ghh-smoke{position:absolute;inset:0}',
+    '#gh-hud .ghh-sm{position:absolute;left:0;top:0;opacity:0;white-space:nowrap;',
+    'transform-origin:50% 50%;will-change:transform,opacity;',
+    'font-family:var(--ghh-display);font-weight:900;font-size:clamp(12px,2.3vmin,28px);',
+    'color:#fff;text-shadow:0 0 1.1vmin var(--sc,#fff),0 0 2.4vmin var(--sc,#fff),0 1px 0 rgba(0,0,0,.85)}',
+    /* Selo do fim, abaixo do aro (onde a pista ja passou e nada desce). */
+    '#gh-hud .ghh-holds{position:absolute;inset:0}',
+    '#gh-hud .ghh-hold{position:absolute;left:0;top:0;opacity:0;white-space:nowrap;',
+    'transform-origin:50% 50%;will-change:transform,opacity;',
+    'padding:.55vmin 1.3vmin;border-radius:99px;',
+    'background:rgba(8,10,20,.74);border:1px solid var(--hc,#fff);',
+    'box-shadow:0 0 2.2vmin var(--hc,#fff),inset 0 0 1.2vmin rgba(255,255,255,.08);',
+    'font-family:var(--ghh-display);font-weight:900;text-transform:uppercase;',
+    'font-size:clamp(11px,1.95vmin,24px);letter-spacing:.12em;color:#fff;',
+    'text-shadow:0 1px 0 rgba(0,0,0,.9)}',
+    '#gh-hud .ghh-hold .hk{color:var(--hc,#fff)}',
+    '#gh-hud .ghh-hold .hp{margin-left:.8vmin;font-variant-numeric:tabular-nums;letter-spacing:.04em}',
+    '#gh-hud .ghh-hold.done{border-color:var(--ghh-gold);box-shadow:0 0 2.6vmin var(--ghh-gold)}',
+    '#gh-hud .ghh-hold.done .hk{color:var(--ghh-gold)}',
+
     /* ================================================ JULGAMENTO FLUTUANTE */
     '#gh-hud .ghh-floats{position:absolute;inset:0}',
     '#gh-hud .ghh-fl{position:absolute;left:0;top:0;opacity:0;white-space:nowrap;',
@@ -403,7 +439,9 @@
     'rgba(2,3,9,.32) 44%,rgba(2,3,9,0) 78%)}',
 
     /* ============================================================ CONTAGEM */
-    '#gh-hud .ghh-count{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);',
+    /* 30% e nao 44%: no meio da tela o 3-2-1 ficava em cima das primeiras
+       notas, que ja vem descendo durante a contagem; aqui ele fica no palco */
+    '#gh-hud .ghh-count{position:absolute;left:50%;top:30%;transform:translate(-50%,-50%);',
     'text-align:center;opacity:0;will-change:opacity}',
     '#gh-hud .ghh-count-n{font-family:var(--ghh-display);font-weight:900;line-height:.88;',
     'font-size:clamp(60px,21vmin,280px);letter-spacing:-.04em;transform-origin:50% 50%;',
@@ -440,6 +478,7 @@
     'background:radial-gradient(ellipse 46% 92% at 50% 50%,rgba(2,6,18,.86) 0%,',
     'rgba(2,6,18,.60) 46%,rgba(2,6,18,0) 100%);',
     'text-shadow:0 1px 0 rgba(0,0,0,.95),0 0 2.2vmin var(--ghh-spc),0 0 6vmin rgba(90,180,255,.95)}',
+
 
     /* ================================================== RODAPE DE AJUDA ====
        Duas mensagens que existem por um motivo medido, nao por enfeite:
@@ -553,6 +592,19 @@
 
   /* julgamentos */
   var floats = [];
+  var holds = [];               /* nota longa: estado por raia + selo do fim */
+  var holdClock = 0;
+  var smoke = [];               /* fumaca de pontos do sustain */
+  var dancers = [];             /* dancarina de carimbo, uma por raia */
+  var SMOKE_POOL = 40;
+  var SMOKE_GAP = 0.11;         /* um "+N" a cada ~0,1 s por sustain */
+  /* Sorteio LOCAL e semeado: a fumaca balanca diferente a cada numero sem
+     consumir o GH.Util.rand, cuja sequencia o modo captura usa. */
+  var smokeSeed = 0x2f6b1d3;
+  function smokeRand() {
+    smokeSeed = (smokeSeed * 1664525 + 1013904223) >>> 0;
+    return smokeSeed / 4294967296;
+  }
   var floatCd = 0;
   var laneCd = [0, 0, 0, 0, 0];
   var laneX = [36.1, 43.0, 50.0, 57.0, 63.9];
@@ -844,6 +896,30 @@
         el: mk('div', 'ghh-fl', D.floats),
         t: 0, life: 1, x: 0, y: 0, sc: 1, txt: '', col: '', on: false
       });
+    }
+
+    /* ------------------------------ nota longa segurada ------------------- */
+    /* Fumaca de pontos: "+N" pequenos subindo do aro enquanto o traste
+       segura, como fumaca de fogueira. */
+    D.dancers = mk('div', 'ghh-dancers', root);
+    for (var dn = 0; dn < 5; dn++) {
+      dancers.push({ el: mk('div', 'ghh-dancer', D.dancers), a: 0, t: 0, frame: -1, shown: false });
+    }
+    /* aquece o cache: a primeira nota longa ja encontra a imagem pronta */
+    try { var preDancer = new Image(); preDancer.src = DANCER_SRC; } catch (eD) { /* ok */ }
+    D.smoke = mk('div', 'ghh-smoke', root);
+    for (var sm = 0; sm < SMOKE_POOL; sm++) {
+      smoke.push({ el: mk('div', 'ghh-sm', D.smoke), on: false, t: 0, life: 1,
+                   x0: 0, y0: 0, ph: 0, amp: 0, drift: 0, txt: '', col: '' });
+    }
+    /* Selo do fim: "COMPLETO! +N" quando o sustain e segurado ate o fim. */
+    D.holds = mk('div', 'ghh-holds', root);
+    for (var hl = 0; hl < 5; hl++) {
+      var hel = mk('div', 'ghh-hold done', D.holds,
+        '<b class="hk">Completo!</b><span class="hp">+0</span>');
+      hel.style.setProperty('--hc', laneCss(hl, 'glow'));
+      holds.push({ el: hel, p: hel.lastChild, on: false, pts: 0, shown: -1, seen: 0,
+                   done: 0, a: 0, acc: 0, last: 0, next: 0 });
     }
 
     /* ------------------------------- faixa de star power ------------------ */
@@ -1359,6 +1435,7 @@
     floatCd = _max(0, floatCd - dt);
     for (var li = 0; li < 5; li++) laneCd[li] = _max(0, laneCd[li] - dt);
     updateFloats(dt);
+    updateHolds(dt);
 
     /* ================================================ RODAPE DE AJUDA ===== */
     /* 1) AUDIO PARADO. GH.Conductor.audioStalled fica true quando o relogio de
@@ -1417,6 +1494,149 @@
      ========================================================================= */
 
   var JUDGE = { perfect: 'PERFEITO!', good: 'BOM', miss: 'ERROU' };
+
+  /* ------------------------------------------------ nota longa segurada */
+  /* Raias do sustain; a nota aberta nao tem raia e fica no centro. */
+  function holdLanes(e) {
+    if (e.lanes && e.lanes.length) return e.lanes;
+    return (typeof e.lane === 'number' && e.lane >= 0) ? [e.lane] : [2];
+  }
+
+  /* GH.Scoring manda 'sustain' 15x por segundo enquanto a nota longa vive,
+     com os pontos ACUMULADOS dela; `active` diz se o traste ainda segura.
+     O que entrou desde a ultima noticia vira combustivel da fumaca. */
+  function onHold(e) {
+    var ls = holdLanes(e);
+    var pts = e.points || 0;
+    for (var i = 0; i < ls.length; i++) {
+      var h = holds[ls[i]];
+      if (!h) continue;
+      if (h.gi !== e.groupIdx) { h.gi = e.groupIdx; h.last = 0; h.acc = 0; h.next = 0; }
+      /* acorde: os pontos sao do ataque inteiro, divididos entre as raias */
+      if (pts > h.last) h.acc += (pts - h.last) / ls.length;
+      h.last = pts;
+      h.on = !!e.active;
+      h.pts = pts;
+      h.seen = holdClock;
+      h.done = 0;
+    }
+  }
+
+  function onHoldEnd(e) {
+    var ls = holdLanes(e);
+    for (var i = 0; i < ls.length; i++) {
+      var h = holds[ls[i]];
+      if (!h) continue;
+      h.on = false;
+      /* o resto do combustivel sai numa ultima baforada */
+      if (h.acc >= 1) { spawnSmoke(ls[i], '+' + _round(h.acc)); h.acc = 0; }
+      /* segurou ate o fim: selo de parabens com o total */
+      if (e.completed) { h.done = 1; h.pts = e.points || h.pts; }
+    }
+  }
+
+  function spawnSmoke(lane, txt) {
+    var p = null, oldest = null;
+    for (var i = 0; i < smoke.length; i++) {
+      if (!smoke[i].on) { p = smoke[i]; break; }
+      if (!oldest || smoke[i].t > oldest.t) oldest = smoke[i];
+    }
+    if (!p) p = oldest;
+    if (!p) return;
+    p.on = true;
+    p.t = 0;
+    p.life = 1.15 + smokeRand() * 0.5;
+    p.x0 = laneX[lane] + (smokeRand() - 0.5) * 2.4;
+    /* sai de cima da cabeca da dancarina: a danca solta os pontos */
+    p.y0 = laneY + DANCER_FOOT - DANCER_H * 0.88;
+    p.ph = smokeRand() * 6.283;
+    p.amp = 1.0 + smokeRand() * 1.3;            /* balanco lateral, em vw */
+    p.drift = (smokeRand() - 0.5) * 3.6;         /* o vento leva um pouco */
+    if (p.txt !== txt) { p.el.textContent = txt; p.txt = txt; }
+    var col = laneCss(lane, 'glow');
+    if (p.col !== col) { p.el.style.setProperty('--sc', col); p.col = col; }
+    p.el.style.opacity = '0';
+  }
+
+  /* Cada numero sobe desacelerando, balanca cada vez mais largo, cresce e
+     se desfaz — o desenho de fumaca de fogueira. */
+  function updateSmoke(dt) {
+    for (var i = 0; i < smoke.length; i++) {
+      var p = smoke[i];
+      if (!p.on) continue;
+      p.t += dt / p.life;
+      if (p.t >= 1) { p.on = false; p.el.style.opacity = '0'; continue; }
+      var u = p.t;
+      var rise = easeOutCubic(u) * 15 + u * 4;               /* vh */
+      var x = p.x0 + p.drift * u + _sin(p.ph + u * 7.5) * p.amp * u;
+      var sc = 0.72 + 0.6 * u;
+      var op = u < 0.10 ? u / 0.10 : (u > 0.45 ? 1 - (u - 0.45) / 0.55 : 1);
+      p.el.style.transform =
+        'translate(' + x.toFixed(2) + 'vw,' + (p.y0 - rise).toFixed(2) + 'vh) ' +
+        'translate(-50%,-50%) scale(' + sc.toFixed(3) + ')';
+      p.el.style.opacity = clamp01(op * 0.95).toFixed(3);
+    }
+  }
+
+  function updateHolds(dt) {
+    holdClock += dt;
+    for (var i = 0; i < holds.length; i++) {
+      var h = holds[i];
+      /* sem noticia do Scoring (pausa, fim abrupto): a fumaca nao fica presa */
+      if (h.on && holdClock - h.seen > 0.35) h.on = false;
+      if (h.on) {
+        h.next -= dt;
+        if (h.next <= 0 && h.acc >= 1) {
+          var n = _round(h.acc);
+          spawnSmoke(i, '+' + n);
+          h.acc -= n;
+          h.next = SMOKE_GAP * (0.8 + smokeRand() * 0.4);
+        }
+      }
+      if (h.done > 0) h.done = _max(0, h.done - dt / 0.95);
+      h.a = damp(h.a, h.done > 0 ? 1 : 0, 18, dt);
+      if (h.a < 0.004 && !(h.done > 0)) {
+        if (h.el.style.opacity !== '0') h.el.style.opacity = '0';
+        continue;
+      }
+      var pts = _round(h.pts);
+      if (pts !== h.shown) { h.p.textContent = '+' + pts; h.shown = pts; }
+      /* selo do fim: um pulo e sobe um pouco enquanto some */
+      var sc = 1 + 0.22 * easeOutBack(clamp01((1 - h.done) * 4), 2.2) - 0.22 * (1 - h.done);
+      var lift = (1 - h.done) * 3.2;
+      h.el.style.transform =
+        'translate(' + laneX[i].toFixed(2) + 'vw,' + (laneY + 11 - lift).toFixed(2) + 'vh) ' +
+        'translate(-50%,-50%) scale(' + sc.toFixed(3) + ')';
+      h.el.style.opacity = clamp01(h.a).toFixed(3);
+    }
+    updateDancers(dt);
+    updateSmoke(dt);
+  }
+
+  /* A dancarina gira enquanto a raia segura: entra com um pulinho a partir
+     dos pes, sempre comecando de frente, e some ao soltar. */
+  function updateDancers(dt) {
+    for (var i = 0; i < dancers.length; i++) {
+      var z = dancers[i], on = !!(holds[i] && holds[i].on);
+      if (on) z.t += dt; else if (z.a < 0.01) z.t = 0;
+      z.a = damp(z.a, on ? 1 : 0, on ? 14 : 9, dt);
+      if (z.a < 0.004 && !on) {
+        if (z.shown) { z.el.style.opacity = '0'; z.shown = false; }
+        continue;
+      }
+      z.shown = true;
+      var f = Math.floor(z.t * DANCER_FPS) % DANCER_FRAMES;
+      if (f !== z.frame) {
+        z.el.style.backgroundPosition = (f * 100 / (DANCER_FRAMES - 1)).toFixed(4) + '% 0';
+        z.frame = f;
+      }
+      var pop = 0.55 + 0.45 * easeOutBack(clamp01(z.a), 1.8);
+      z.el.style.transform =
+        'translate(' + laneX[i].toFixed(2) + 'vw,' + (laneY + DANCER_FOOT).toFixed(2) + 'vh) ' +
+        'translate(-50%,-100%) scale(' + pop.toFixed(3) + ')';
+      z.el.style.opacity = (clamp01(z.a) * 0.96).toFixed(3);
+    }
+  }
 
   function onHit(e) {
     var lane = (typeof e.lane === 'number') ? e.lane : -1;
@@ -1552,7 +1772,10 @@
           spCallText(spActive);
           break;
 
-        default: break;   /* sustain / sustainEnd / finish: nada a fazer aqui */
+        case 'sustain':    onHold(e); break;
+        case 'sustainEnd': onHoldEnd(e); break;
+
+        default: break;   /* finish: nada a fazer aqui */
       }
     } catch (err) {
       /* Um evento malformado nunca pode derrubar o HUD no meio da musica. */
@@ -1632,8 +1855,7 @@
     if (!tutSpent && !(song && song.tutorial)) { tutSpent = true; tutArmed = true; }
 
     sections = (song && song.sections && song.sections.length) ? song.sections : null;
-    secIdx = -1; secPop = 0;
-    buildProgressMarks(song);
+    secIdx = -1; secPop = 0;    buildProgressMarks(song);
     setText(D.progTotal, fmtTime(songDuration), 'totalTxt');
     probeMetrics();
   }
@@ -1663,6 +1885,20 @@
     spCallPhase = 0; spPulse = 0; aura = 0; bandT = 0;
     spCallText(false);
 
+    for (var hi = 0; hi < holds.length; hi++) {
+      holds[hi].on = false; holds[hi].done = 0; holds[hi].a = 0;
+      holds[hi].acc = 0; holds[hi].last = 0; holds[hi].gi = -1;
+      holds[hi].el.style.opacity = '0';
+    }
+    for (var si = 0; si < smoke.length; si++) {
+      smoke[si].on = false;
+      smoke[si].el.style.opacity = '0';
+    }
+    for (var di = 0; di < dancers.length; di++) {
+      dancers[di].a = 0; dancers[di].t = 0; dancers[di].shown = false;
+      dancers[di].el.style.opacity = '0';
+    }
+
     progressShown = 0; secIdx = -1; secPop = 0; secHot = false;
     D.section.className = 'ghh-section';
     starsShown = 0;
@@ -1675,8 +1911,7 @@
 
     D.aura.style.opacity = '0';
     D.hurt.style.opacity = '0';
-    D.spBand.style.opacity = '0';
-    D.count.style.opacity = '0';
+    D.spBand.style.opacity = '0';    D.count.style.opacity = '0';
     D.section.style.opacity = '0';
     D.mile.style.opacity = '0';
 
@@ -2245,6 +2480,39 @@
         line('tocando', String(!!GH.Conductor.isPlaying));
       }
     } catch (e4) { /* ok */ }
+    /* Saida de audio: e aqui que mora o "som cortando" com fps alto (underrun
+       da thread de audio), entao o relatorio precisa dizer o modo, a folga e,
+       quando o navegador conta, quantas vezes a placa ficou sem som. */
+    try {
+      var Au = GH.Audio, actx = Au && Au.ctx;
+      if (actx) {
+        var act = Au.stabilityActive || '?';
+        line('saída de áudio', 'modo ' + act +
+             (Au.stability && Au.stability !== act ? ' (escolhido ' + Au.stability + ', vale após recarregar)' : '') +
+             ', ' + nInt(actx.sampleRate) + ' Hz, estado ' + actx.state);
+        line('latência', 'base ' + (isFinite(actx.baseLatency) ? nDec(actx.baseLatency * 1000, 1) + ' ms' : '—') +
+             ', saída ' + (isFinite(actx.outputLatency) ? nDec(actx.outputLatency * 1000, 1) + ' ms' : '—') +
+             ', folga ' + (Au.slackBlocks >= 0 ? nDec(Au.slackBlocks, 1) + ' blocos de 128' : '—'));
+        var pst = actx.playbackStats || actx.playoutStats;
+        if (pst) {
+          var bits = [];
+          var KEYS = ['underrunEvents', 'underrunDuration', 'fallbackFramesEvents', 'fallbackFramesDuration', 'totalDuration'];
+          for (var pk = 0; pk < KEYS.length; pk++) {
+            var pv = pst[KEYS[pk]];
+            if (typeof pv === 'number' && isFinite(pv)) bits.push(KEYS[pk] + ' ' + (pv % 1 ? nDec(pv, 3) : nInt(pv)));
+          }
+          line('CORTES NA SAÍDA (navegador)', bits.length ? bits.join(', ') : '(sem números)');
+        } else {
+          line('CORTES NA SAÍDA (navegador)', '(este navegador não informa)');
+        }
+      }
+      if (GH.Stems && typeof GH.Stems.diag === 'function') {
+        var sd = GH.Stems.diag();
+        line('música', sd.mode === 'stems' ? 'stems pré-gravadas'
+             : (sd.mode === 'live' ? 'SINTETIZADA AO VIVO (pesada) — ' + (sd.lastError || sd.state)
+             : sd.mode + ' / ' + sd.state) + ' · ' + (sd.song || '—'));
+      }
+    } catch (eAu) { /* ok */ }
     if (s) {
       line('eventos agendados', nInt(s.events) + ' em ' + nInt(s.windows) + ' janelas');
       line('AGENDADOS NO PASSADO', nInt(s.past) + ' (empurrados: ' + nInt(s.nudged) +

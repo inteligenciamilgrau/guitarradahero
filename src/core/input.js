@@ -1131,7 +1131,8 @@
           for (i = 0; i < list.length && clean.length < 12; i++) {
             if (typeof list[i] === 'string' && CODE_RE.test(list[i])) clean.push(list[i]);
           }
-          if (clean.length) bindings[k] = clean;
+          /* recomecar pode ficar sem tecla de proposito (jogador tirou o R) */
+          if (clean.length || (k === 'restart' && !list.length)) bindings[k] = clean;
         }
         rebuildCodeMap();
         return true;

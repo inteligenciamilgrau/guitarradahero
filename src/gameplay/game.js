@@ -246,7 +246,8 @@
       cam: 'gameplay', camTime: 0.75, hud: true, menu: null,
       inputContext: 'game', intensity: 0.75, showWorld: true,
       enter: function (opts) {
-        if (!opts || !opts.fromPause) {
+        /* quiet: comecou sem contagem — sem o "VAI!" e sem a festa da largada */
+        if (!opts || (!opts.fromPause && !opts.quiet)) {
           mcall('HUD', 'event', { type: 'go' });
           sfx('uiSelect');
           sfx('crowdCheer', 0.85);
@@ -325,10 +326,18 @@
      6. ATALHOS DE AUDIO
      ========================================================================= */
 
-  function sfx(name, a, b) {
+  function sfx(name, a, b, c) {
     var A = GH.Audio;
     if (!A || !A.sfx || typeof A.sfx[name] !== 'function') return;
-    try { A.sfx[name](a, b); } catch (e) { warn('Audio.sfx.' + name, e); }
+    try { A.sfx[name](a, b, c); } catch (e) { warn('Audio.sfx.' + name, e); }
+  }
+
+  /* Altura da melodia na nota acertada (-1 se o chart nao traz): o som do
+     acerto toca ESSA nota, e nao a afinacao fixa da raia. */
+  function noteMidi(idx) {
+    var C = GH.Chart;
+    var n = (C && C.notes && idx >= 0) ? C.notes[idx] : null;
+    return (n && n.midi > 0) ? n.midi : -1;
   }
 
   /* =========================================================================
@@ -513,9 +522,22 @@
     GH.Game.songTime = 0;
   }
 
-  /* Comeca a partida: contagem regressiva e depois a musica. */
-  function startSong(s, d) {
+  /* Comeca a partida: contagem regressiva e depois a musica.
+     opts.countdown === false: sem 3-2-1 (as licoes do tutorial). O relogio
+     comeca so com a folga que a primeira nota precisa para entrar pelo fundo
+     da pista, e o jogo vai direto para 'playing'. */
+  function startSong(s, d, opts) {
     if (!prepareSong(s, d)) return false;
+    if (opts && opts.countdown === false) {
+      var first = (GH.Chart && GH.Chart.stats) ? GH.Chart.stats.firstNoteTime : 0;
+      var look = mcall('Chart', 'lookaheadSec') || 3.3;
+      leadIn = Math.max(0.6, look + LEADIN_PAD - first);
+      GH.Game.leadIn = leadIn;
+      mcall('Conductor', 'start', -leadIn);
+      mcall('Scoring', 'setPaused', false);
+      setState('playing', { quiet: true });
+      return true;
+    }
     mcall('Conductor', 'start', -leadIn);
     mcall('Scoring', 'setPaused', false);
     setState('countdown');
@@ -709,7 +731,8 @@
     if (e.chord) mcall('Engine', 'kick', 0.030 + 0.006 * e.chordSize);
 
     /* --- som --- */
-    if (e.open) sfx('openHit'); else sfx('hit', lanes.length ? lanes[0] : 0, e.quality);
+    if (e.open) sfx('openHit', noteMidi(e.noteIdx));
+    else sfx('hit', lanes.length ? lanes[0] : 0, e.quality, noteMidi(e.noteIdx));
 
     /* --- guitarra volta a soar --- */
     mcall('Synth', 'setGuitarMuted', false);
@@ -950,8 +973,10 @@
           }
           break;
 
+        /* Atalho de recomecar so na pausa e nos resultados: com a musica
+           rodando, um R esbarrado jogava fora a partida inteira. */
         case 'restart':
-          if (state === 'playing' || state === 'paused' || state === 'results') restart();
+          if (state === 'paused' || state === 'results') restart();
           break;
 
         /* 'Enter' e palhetada E confirmar. O GH.Input ja suprime as acoes de

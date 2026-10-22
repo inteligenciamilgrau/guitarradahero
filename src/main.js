@@ -906,7 +906,8 @@
         songTime: CAP_T,
         preroll: CAP_PREROLL,
         songId: Q.song || undefined,
-        difficulty: Q.diff || undefined
+        difficulty: Q.diff || undefined,
+        snap: Q.snap || undefined          /* snap=none: o instante exato de ?t= */
       });
     });
 

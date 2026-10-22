@@ -137,6 +137,8 @@
       tap: !!raw.tap,
       open: open,
       sp: !!raw.sp,
+      /* altura da melodia nessa nota (o som do acerto acompanha); -1 = sem */
+      midi: (isFinite(+raw.midi) && +raw.midi > 0) ? +raw.midi : -1,
       chord: false,
       /* --- preenchido pela normalizacao --- */
       idx: -1,          // indice global em GH.Chart.notes

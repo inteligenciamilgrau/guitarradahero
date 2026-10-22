@@ -1698,6 +1698,7 @@
       if (!count) continue;
       phrases.push({
         tStart: groups[first][0].t,
+        tLast: groups[last][0].t,
         tEnd: round4(groups[last][0].t + (groups[last][0].dur || 0)),
         count: count,
         firstGroup: first,
@@ -1705,6 +1706,70 @@
       });
     }
     return phrases;
+  }
+
+  /* ===========================================================================
+     15B. JANELA DE DEDOS (Facil e Medio)
+     Com 3 ou 4 raias sempre a partir do verde, o iniciante so treinaria os
+     dedos da esquerda. Aqui a janela anda pela pista de 5 raias, trocando
+     logo depois de cada frase de Star Power:
+       Facil: meio (2-4) -> direita (3-5) -> esquerda (1-3) -> direita...
+       Medio: direita (2-5) -> esquerda (1-4) -> direita...
+     A troca cai no primeiro respiro entre notas depois da frase; o tempo dela
+     vai em song.laneWindows para a pista avisar o jogador.
+     =========================================================================== */
+
+  var LANE_WINDOWS = {
+    facil: { first: 1, cycle: [2, 0] },
+    medio: { first: 1, cycle: [0, 1] }
+  };
+  var LW_GAP = 0.45;      // respiro minimo (s) antes da primeira nota da janela nova
+  var LW_SEARCH = 4.0;    // quanto procurar esse respiro depois da frase
+
+  function groupEnd(g) {
+    var e = g[0].t;
+    for (var i = 0; i < g.length; i++) e = Math.max(e, g[i].t + (g[i].dur || 0));
+    return e;
+  }
+
+  function applyLaneWindows(notes, phrases, tl, cfg, name) {
+    var spec = LANE_WINDOWS[name];
+    if (!spec || !notes.length) return null;
+    var groups = groupByTime(notes);
+    var wins = [{ t: 0, lo: spec.first, hi: spec.first + cfg.lanes - 1, g: 0 }];
+    var gi = 0, p, k, i, j;
+
+    for (p = 0; p < phrases.length; p++) {
+      while (gi < groups.length && groups[gi][0].t <= phrases[p].tLast + 1e-4) gi++;
+      if (gi < 1 || gi >= groups.length) break;
+      var limitT = groups[gi][0].t + LW_SEARCH;
+      if (p + 1 < phrases.length) limitT = Math.min(limitT, phrases[p + 1].tStart);
+      // sem respiro bom no trecho, fica com o maior que houver
+      var pick = gi, best = -Infinity;
+      for (k = gi; k < groups.length && (k === gi || groups[k][0].t < limitT); k++) {
+        var gap = groups[k][0].t - groupEnd(groups[k - 1]);
+        if (gap > best + 0.02) { best = gap; pick = k; }
+        if (gap >= LW_GAP) break;
+      }
+      var gt = groups[pick][0].t;
+      var lead = clamp((gt - groupEnd(groups[pick - 1])) * 0.5, 0.05, 0.5);
+      var lo = spec.cycle[(wins.length - 1) % spec.cycle.length];
+      wins.push({ t: round4(gt - lead), lo: lo, hi: lo + cfg.lanes - 1, g: pick });
+      gi = pick;
+    }
+
+    for (k = 0; k < wins.length; k++) {
+      var gEnd = (k + 1 < wins.length) ? wins[k + 1].g : groups.length;
+      for (i = wins[k].g; i < gEnd; i++) {
+        for (j = 0; j < groups[i].length; j++) {
+          if (!groups[i][j].open) groups[i][j].lane += wins[k].lo;
+        }
+      }
+      delete wins[k].g;
+    }
+    fixSustains(notes, cfg);
+    markHopos(notes, tl, cfg);
+    return wins;
   }
 
   /* ===========================================================================
@@ -1999,6 +2064,7 @@
     var spPhrases = {};
     var validation = {};
     var leadSelection = null;
+    var laneWindows = {};
     var d, i;
 
     var allEvents = null;
@@ -2031,6 +2097,7 @@
         // campos que dependem da vizinhanca.
         fixSustains(notes, cfg);
         markHopos(notes, tl, cfg);
+        if (LANE_WINDOWS[name]) laneWindows[name] = applyLaneWindows(notes, spPhrases[name], tl, cfg, name);
         if (name === 'guitarrada') {
           // A guitarra do GH.Synth toca EXATAMENTE o chart Expert: descarta da
           // linha de lead qualquer evento que o validador tenha removido.
@@ -2045,6 +2112,7 @@
         notes = emergencyChart(tl, cfg);
         validation[name] = { emergency: 1, msg: String(err2 && err2.message || err2) };
         spPhrases[name] = [];
+        laneWindows[name] = null;
       }
       charts[name] = notes;
       chartStats[name] = statsOf(notes, tl.musicEnd);
@@ -2052,7 +2120,9 @@
 
     if (!leadSelection) leadSelection = allEvents || [];
 
-    return assembleSong(def, tl, leadSelection, charts, chartStats, spPhrases, validation);
+    var song = assembleSong(def, tl, leadSelection, charts, chartStats, spPhrases, validation);
+    song.laneWindows = laneWindows;
+    return song;
   }
 
   // O objeto publico de musica — o mesmo formato para as seis musicas e para
@@ -2144,22 +2214,55 @@
     }
     chart.sort(function (a, b) { return a.t - b.t || a.lane - b.lane; });
 
-    // Altura de cada ataque: as raias sobem pelas notas do acorde do compasso
-    // (arpejo dentro do registro da guitarra); o bastao e a fundamental grave.
-    var lead = [];
+    // Altura de cada ataque, pela harmonia funcional:
+    //  - cada raia tem um ALVO fixo no arpejo da tonica (verde = tonica,
+    //    vermelho = terca, amarelo = quinta, azul/laranja = oitava acima), entao
+    //    subir de raia e sempre subir de altura e a melodia tem contorno;
+    //  - em cada compasso o alvo cai na nota MAIS PROXIMA do acorde vigente:
+    //    no V7 o verde vira a sensivel, que resolve na tonica no compasso
+    //    seguinte. Nada de nota fora do acorde, nada de salto cromatico.
+    //  - o bastao e a fundamental do acorde, no grave.
+    var rootPc = parseNoteName(d.key);
+    var base = foldToRange(48 + rootPc, 55, 66);
+    var third = scale[2] || 4;
+    var targets = [base, base + third, base + 7, base + 12, base + 12 + third];
+    var laneCache = {};
+    function laneMidis(h) {
+      if (laneCache[h.symbol]) return laneCache[h.symbol];
+      var tones = [], m, k;
+      for (m = base - 6; m <= base + 24; m++) if (h.pcs.indexOf(m % 12) >= 0) tones.push(m);
+      var out = [], prev = -1;
+      for (k = 0; k < targets.length; k++) {
+        var best = -1;
+        for (var q = 0; q < tones.length; q++) {
+          if (tones[q] <= prev) continue;
+          if (best < 0 || Math.abs(tones[q] - targets[k]) < Math.abs(best - targets[k]) ||
+              (Math.abs(tones[q] - targets[k]) === Math.abs(best - targets[k]) && tones[q] > best)) best = tones[q];
+        }
+        if (best < 0) best = prev + 12;
+        out.push(best);
+        prev = best;
+      }
+      laneCache[h.symbol] = out;
+      return out;
+    }
+
+    var lead = [], exact = [];
     var groups = groupByTime(chart);
     for (i = 0; i < groups.length; i++) {
       var g = groups[i];
       var h = tl.harmony[clamp(Math.floor(g[0].t / tl.barSec + 1e-6), 0, tl.harmony.length - 1)];
-      var tones = [];
-      for (var m = 57; m <= 88; m++) if (h.pcs.indexOf(m % 12) >= 0) tones.push(m);
-      var lane = 4, dur = 0;
-      for (j = 0; j < g.length; j++) { lane = Math.min(lane, g[j].lane); dur = Math.max(dur, g[j].dur); }
-      var midi = g[0].open ? 40 + ((h.rootPc - 4) % 12 + 12) % 12 : tones[Math.min(lane + 1, tones.length - 1)];
-      for (j = 0; j < g.length; j++) g[j].midi = midi;
+      var lm = laneMidis(h), mids = [], dur = 0;
+      for (j = 0; j < g.length; j++) {
+        g[j].midi = g[j].open ? 40 + ((h.rootPc - 4) % 12 + 12) % 12 : lm[g[j].lane];
+        mids.push(g[j].midi);
+        dur = Math.max(dur, g[j].dur);
+      }
+      mids.sort(function (a, b) { return a - b; });
+      exact.push(mids);
       lead.push({
-        t: g[0].t, durSec: dur > 0 ? dur : tl.beatSec, midi: midi,
-        voicing: g[0].open ? 1 : g.length, open: g[0].open, tap: false,
+        t: g[0].t, durSec: dur > 0 ? dur : tl.beatSec, midi: mids[0],
+        voicing: 1, open: g[0].open, tap: false,
         accent: g.length > 1, strength: 8, sec: h.section, scale: scale, voiceDown: false
       });
     }
@@ -2171,7 +2274,12 @@
       spPhrases[DIFF_ORDER[i]] = [];
       validation[DIFF_ORDER[i]] = { custom: 1 };
     }
-    return assembleSong(d, tl, lead, charts, chartStats, spPhrases, validation);
+    var song = assembleSong(d, tl, lead, charts, chartStats, spPhrases, validation);
+    // Acorde de duas cores soa EXATAMENTE as duas notas das raias (o arranjo
+    // empilharia uma terca da escala por conta propria).
+    var evs = song.arrangement.lead.events;
+    for (i = 0; i < evs.length && i < exact.length; i++) evs[i].midis = exact[i];
+    return song;
   }
 
   /* ===========================================================================

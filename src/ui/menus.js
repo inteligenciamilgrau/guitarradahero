@@ -213,6 +213,13 @@
     'font-size:calc(var(--u)*.68);letter-spacing:.16em;text-transform:uppercase;',
     'font-weight:700;color:var(--ink-faint)}',
     '#gh-menus .hints b{color:var(--ink-dim)}',
+    /* "Esc voltar" e tambem um botao: quem esta no mouse precisa sair da tela */
+    '#gh-menus .hback{cursor:pointer;display:inline-flex;align-items:center;',
+    'padding:calc(var(--u)*.26) calc(var(--u)*.8) calc(var(--u)*.26) calc(var(--u)*.32);',
+    'border-radius:calc(var(--u)*.6);border:1px solid rgba(255,255,255,.24);',
+    'background:rgba(255,255,255,.07);color:var(--ink-dim);',
+    'transition:background .15s,border-color .15s,color .15s}',
+    '#gh-menus .hback:hover{background:rgba(255,255,255,.17);border-color:rgba(255,255,255,.55);color:var(--ink)}',
     '#gh-menus .key{display:inline-block;min-width:calc(var(--u)*1.5);padding:calc(var(--u)*.12) calc(var(--u)*.42);',
     'margin-right:calc(var(--u)*.34);border-radius:calc(var(--u)*.24);text-align:center;',
     'background:linear-gradient(180deg,rgba(255,255,255,.15),rgba(255,255,255,.05));',
@@ -1044,6 +1051,17 @@
     return s;
   }
 
+  /* A dica "Esc voltar" do rodape, clicavel. Faz o mesmo que o Esc. */
+  function backHint(scr) {
+    var b = mk('span', 'hback pe', '<b class="key">Esc</b> voltar');
+    b.addEventListener('mousedown', function (ev) {
+      if (current !== scr) return;
+      ev.preventDefault();
+      back();
+    }, false);
+    return b;
+  }
+
   /* Registra um elemento como item navegavel. `def` descreve o comportamento. */
   function item(scr, el, def) {
     def = def || {};
@@ -1564,12 +1582,12 @@
   var DIFF_INFO = {
     facil: {
       label: 'Fácil', tag: 'I', lanes: '3 raias',
-      desc: 'Três raias e uma nota de cada vez. Pra pegar o balanço da guitarrada sem susto.',
+      desc: 'Três raias e uma nota de cada vez. Começa no meio e troca de lado a cada Star Power: todos os dedos treinam.',
       hue: 145
     },
     medio: {
       label: 'Médio', tag: 'II', lanes: '4 raias',
-      desc: 'Quatro raias e os primeiros acordes de duas notas. O braço começa a acordar.',
+      desc: 'Quatro raias e os primeiros acordes de duas notas. Direita e esquerda se revezam a cada Star Power.',
       hue: 48
     },
     dificil: {
@@ -1936,10 +1954,9 @@
 
     var foot = add(pane, mk('div', 'foot'));
     add(foot, mk('p', 'notice', esc(NOTICE_1) + ' ' + esc(NOTICE_2)));
-    add(foot, mk('div', 'hints',
+    add(add(foot, mk('div', 'hints',
       '<span><b class="key">&uarr;</b><b class="key">&darr;</b> navegar</span>' +
-      '<span><b class="key">Enter</b> escolher</span>' +
-      '<span><b class="key">Esc</b> voltar</span>'));
+      '<span><b class="key">Enter</b> escolher</span>')), backHint(s));
 
     s.parts = { list: list, art: art, artCv: artCv, hTitle: hTitle, hSub: hSub, hTrib: hTrib,
                 hChips: hChips, hDiffs: hDiffs, headR: headR, bgA: bgA, bgB: bgB, rows: [] };
@@ -2229,10 +2246,9 @@
 
     var foot = add(pane, mk('div', 'foot'));
     add(foot, mk('p', 'notice', 'A dificuldade muda o chart inteiro: número de raias, acordes, HOPOs, taps e sustains.'));
-    add(foot, mk('div', 'hints',
+    add(add(foot, mk('div', 'hints',
       '<span><b class="key">&larr;</b><b class="key">&rarr;</b> escolher</span>' +
-      '<span><b class="key">Enter</b> tocar</span>' +
-      '<span><b class="key">Esc</b> voltar</span>'));
+      '<span><b class="key">Enter</b> tocar</span>')), backHint(s));
 
     s.parts = { cards: cards, hTitle: hTitle, headR: headR, miniCv: miniCv, head: head, row: row, foot: foot };
 
@@ -2330,7 +2346,14 @@
     if (!C || !C.groups || !C.groups.length) return out;
     var g = C.groups;
     out.dur = (C.stats && C.stats.durationSec) ? C.stats.durationSec : (g[g.length - 1].t + 2);
-    var streak = 0, i, r, t;
+    /* Star Power DOBRA o multiplicador (4x vira 8x). Sem os trechos em que
+       ele esteve ligado, o grafico parava em 4x mesmo quando o jogador fez 8x. */
+    var spans = (S && typeof S.starPowerSpans === 'function') ? S.starPowerSpans() : [];
+    function spAt(x) {
+      for (var k = 0; k < spans.length; k++) if (x >= spans[k].a && x < spans[k].b) return true;
+      return false;
+    }
+    var streak = 0, i, r, t, base = [];
     for (i = 0; i < g.length; i++) {
       t = g[i].t;
       r = (S && typeof S.groupResult === 'function') ? S.groupResult(i) : 'none';
@@ -2340,8 +2363,23 @@
         streak++;
         out.pts.push({ t: t, ms: (typeof S.groupDelta === 'function') ? S.groupDelta(i) : 0, perfect: r === 'perfect' });
       }
-      out.mult.push({ t: t, m: Math.min(4, 1 + Math.floor(streak / 10)) });
+      var bm = Math.min(4, 1 + Math.floor(streak / 10)), sp = spAt(t);
+      base.push({ t: t, m: bm });
+      out.mult.push({ t: t, m: bm * (sp ? 2 : 1), sp: sp });
     }
+    /* o degrau tem que cair no instante em que o SP liga/desliga, nao so na
+       nota seguinte */
+    function baseAt(x) {
+      var m = 1;
+      for (var k = 0; k < base.length && base[k].t <= x; k++) m = base[k].m;
+      return m;
+    }
+    for (i = 0; i < spans.length; i++) {
+      out.mult.push({ t: spans[i].a, m: baseAt(spans[i].a) * 2, sp: true });
+      out.mult.push({ t: spans[i].b, m: baseAt(spans[i].b), sp: false });
+    }
+    out.mult.sort(function (p, q) { return p.t - q.t; });
+    out.spUsed = spans.length > 0;
     try {
       var ph = C.starPowerPhrases || [];
       for (i = 0; i < ph.length; i++) out.phrases.push({ a: ph[i].tStart, b: ph[i].tEnd });
@@ -2366,7 +2404,8 @@
     if (pw < 10 || phh < 10) return false;
     var dur = Math.max(1, data.dur);
     var win = winMs || 70;
-    var multH = phh * 0.24;
+    /* com Star Power a faixa ganha um degrau (8x) e um pouco mais de altura */
+    var multH = phh * (data.spUsed ? 0.38 : 0.24);
     var lineH = phh - multH;
     var midY = padT + lineH * 0.5;
 
@@ -2419,22 +2458,29 @@
     g.strokeStyle = 'rgba(255,255,255,.34)'; g.lineWidth = 1;
     g.beginPath(); g.moveTo(padL, Math.round(midY) + 0.5); g.lineTo(padL + pw, Math.round(midY) + 0.5); g.stroke();
 
-    /* --- area do multiplicador (base do grafico) --- */
+    /* --- area do multiplicador (base do grafico) ---
+       1x a 4x em degraus iguais; com Star Power usado, o 8x e o degrau LOGO
+       acima do 4x (6x fica no meio). Escala linear ate 8 deixava um vao de
+       4x ate 8x e sumia com o 1x. Trechos dobrados saem no azul do SP, a
+       mesma cor das faixas de frase la em cima. */
     var multY0 = padT + lineH, multY1 = padT + phh;
-    var prevX = padL, prevM = 1;
+    var ROWS = data.spUsed ? 5 : 4;
+    function multRow(m) { return (m <= 4 ? m : 4 + (m - 4) / 4) / ROWS; }
+    function multFill(m, sp) { return sp ? '#8fd8ff' : MULT_COLORS[Math.min(4, m)]; }
+    var prevX = padL, prevM = 1, prevSp = false;
     for (i = 0; i < data.mult.length; i++) {
       var mx = X(data.mult[i].t);
-      var hgt = (prevM / 4) * (multY1 - multY0);
-      g.fillStyle = MULT_COLORS[Math.min(4, prevM)];
-      g.globalAlpha = 0.34;
+      var hgt = multRow(prevM) * (multY1 - multY0);
+      g.fillStyle = multFill(prevM, prevSp);
+      g.globalAlpha = prevSp ? 0.5 : 0.34;
       g.fillRect(prevX, multY1 - hgt, Math.max(0.6, mx - prevX), hgt);
       g.globalAlpha = 1;
-      prevX = mx; prevM = data.mult[i].m;
+      prevX = mx; prevM = data.mult[i].m; prevSp = !!data.mult[i].sp;
     }
     if (prevX < padL + pw) {
-      var hg2 = (prevM / 4) * (multY1 - multY0);
-      g.fillStyle = MULT_COLORS[Math.min(4, prevM)];
-      g.globalAlpha = 0.34;
+      var hg2 = multRow(prevM) * (multY1 - multY0);
+      g.fillStyle = multFill(prevM, prevSp);
+      g.globalAlpha = prevSp ? 0.5 : 0.34;
       g.fillRect(prevX, multY1 - hg2, padL + pw - prevX, hg2);
       g.globalAlpha = 1;
     }
@@ -2443,11 +2489,13 @@
     /* escala do multiplicador na canhota: sem isso a faixa vira so cor */
     g.font = '700 9px "Segoe UI",sans-serif';
     g.textAlign = 'right'; g.textBaseline = 'middle';
-    for (var mm = 1; mm <= 4; mm++) {
-      var my = multY1 - (mm / 4) * (multY1 - multY0);
-      g.fillStyle = 'rgba(150,162,196,' + (mm === 4 ? '.85' : '.45') + ')';
+    var marks = data.spUsed ? [1, 2, 3, 4, 8] : [1, 2, 3, 4];
+    for (var mi = 0; mi < marks.length; mi++) {
+      var mm = marks[mi];
+      var my = multY1 - multRow(mm) * (multY1 - multY0);
+      g.fillStyle = mm === 8 ? 'rgba(143,216,255,.9)' : 'rgba(150,162,196,' + (mm === 4 ? '.85' : '.45') + ')';
       g.fillText(mm + 'x', padL - 6, my + 4);
-      if (mm < 4) {
+      if (mi < marks.length - 1) {
         g.strokeStyle = 'rgba(255,255,255,.07)';
         g.beginPath(); g.moveTo(padL, Math.round(my) + 0.5); g.lineTo(padL + pw, Math.round(my) + 0.5); g.stroke();
       }
@@ -2792,12 +2840,18 @@
     /* rodape */
     var foot = add(pane, mk('div', 'foot'));
     var actions = add(foot, mk('div', 'rs-actions'));
-    var btnGo = add(actions, mk('div', 'btn', 'Continuar'));
+    var btnGo = add(actions, mk('div', 'btn', 'Menu'));
     var btnAgain = add(actions, mk('div', 'btn', 'Tocar de novo'));
     item(s, btnGo, { action: 'title' });
     item(s, btnAgain, { action: 'restart' });
-    add(foot, mk('div', 'hints',
-      '<span><b class="key">Enter</b> confirmar</span><span><b class="key">R</b> repetir</span>'));
+    var hints = add(foot, mk('div', 'hints', ''));
+    /* a tecla de recomecar e configuravel (e pode nem existir) */
+    function paintHints() {
+      var r = bindingList('restart');
+      hints.innerHTML = '<span><b class="key">Enter</b> confirmar</span>' +
+        (r.length ? '<span><b class="key">' + esc(keyLabel(r[0])) + '</b> repetir</span>' : '');
+    }
+    paintHints();
 
     s.parts = { starEls: starEls, banner: banner, bannerBig: bannerBig, bannerSm: bannerSm,
                 scoreVal: scoreVal, scoreRec: scoreRec, grid: grid, gCv: gCv, hCv: hCv,
@@ -2966,6 +3020,7 @@
 
     s.onEnter = function (stats) {
       s.fill(stats);
+      paintHints();
       var failed = !!(stats && stats.failed);
       var defaultIdx = failed ? 1 : 0;
       var idx = setting('lastResultsIndex', defaultIdx);
@@ -3343,8 +3398,12 @@
     '#gh-menus .barv{min-width:calc(var(--u)*3.1);text-align:right}',
     '#gh-menus .cyc{display:flex;align-items:center;gap:calc(var(--u)*.38);',
     'color:var(--ink-faint)}',
-    '#gh-menus .cyc b{color:var(--ink);min-width:calc(var(--u)*4.4);text-align:center;font-weight:700}',
+    /* largura que cabe "Equilibrada"/"Guitarrada": as setas nao andam de uma
+       opcao para outra, e clicar varias vezes no mesmo lugar e confiavel */
+    '#gh-menus .cyc b{color:var(--ink);min-width:calc(var(--u)*6.2);text-align:center;font-weight:700}',
     '#gh-menus .srow.foc .cyc b{color:var(--gold)}',
+    '#gh-menus .snote{font-family:var(--f-ui);font-size:calc(var(--u)*.6);font-weight:800;',
+    'letter-spacing:.08em;text-transform:uppercase;color:var(--gold);white-space:nowrap}',
     '#gh-menus .sw{position:relative;width:calc(var(--u)*2.1);height:calc(var(--u)*1.0);border-radius:99px;',
     'background:rgba(255,255,255,.12);display:block;transition:background .18s ease}',
     '#gh-menus .sw i{position:absolute;top:calc(var(--u)*.13);left:calc(var(--u)*.13);',
@@ -3510,7 +3569,10 @@
         } else if (def.kind === 'choice') {
           var lbl = v;
           for (var i = 0; i < def.options.length; i++) if (def.options[i].v === v) lbl = def.options[i].label;
-          sv.innerHTML = '<span class="cyc">&lsaquo;<b>' + esc(lbl) + '</b>&rsaquo;</span>';
+          /* aviso ANTES do seletor: o seletor fica colado na direita e nao
+             anda quando o aviso aparece (o 2o clique cairia no lado errado) */
+          sv.innerHTML = (def.note && def.note(v) ? '<span class="snote">' + esc(def.note(v)) + '</span>' : '') +
+            '<span class="cyc">&lsaquo;<b>' + esc(lbl) + '</b>&rsaquo;</span>';
         } else if (def.kind === 'toggle') {
           sv.innerHTML = '<span class="sw' + (v ? ' on' : '') + '"><i></i></span>';
         } else if (def.kind === 'key') {
@@ -3692,6 +3754,22 @@
       })(BUSES[vb]);
     }
 
+    /* Folga da saida de audio — ver "ESTABILIDADE DE AUDIO" em audio.js. O
+       motor sempre teve os tres modos, mas nenhuma tela deixava escolher:
+       quem ouvia o som cortar nao tinha o que fazer. O AudioContext so aceita
+       o modo na criacao, entao a troca vale depois de recarregar a pagina. */
+    row(col1, {
+      label: 'Saída de áudio', kind: 'choice',
+      options: [{ v: 'interactive', label: 'Rápida' }, { v: 'balanced', label: 'Equilibrada' },
+                { v: 'playback', label: 'Estável' }],
+      get: function () { return (GH.Audio && GH.Audio.stability) || 'playback'; },
+      set: function (v) { call('Audio', 'setStability', v); },
+      note: function (v) {
+        var act = GH.Audio && GH.Audio.stabilityActive;
+        return (act && act !== v) ? 'vale após F5' : '';
+      }
+    });
+
     /* ---- COLUNA 2: video + jogo -------------------------------------- */
     add(col2, mk('div', 'st-h', 'Vídeo'));
     row(col2, {
@@ -3768,7 +3846,8 @@
       { a: 'fret2', l: 'Raia 3 · amarelo' }, { a: 'fret3', l: 'Raia 4 · azul' },
       { a: 'fret4', l: 'Raia 5 · laranja' },
       { a: 'strumUp', l: 'Palhetada ↑' }, { a: 'strumDown', l: 'Palhetada ↓' },
-      { a: 'starpower', l: 'Star Power' }, { a: 'pause', l: 'Pausar' }
+      { a: 'starpower', l: 'Star Power' }, { a: 'pause', l: 'Pausar' },
+      { a: 'restart', l: 'Recomeçar (na pausa)' }
     ];
     var BIND_LABEL = {};
     for (var kb = 0; kb < BINDS.length; kb++) {
@@ -3826,7 +3905,10 @@
     /* Acoes de NAVEGACAO compartilham tecla de proposito (Enter = palhetada
        para baixo E confirmar); quem separa as duas e o contexto do GH.Input.
        Roubar a tecla delas quebraria o menu — entao nunca mexemos nelas. */
-    var NAV_SAFE = { up: 1, down: 1, left: 1, right: 1, start: 1, back: 1, restart: 1 };
+    var NAV_SAFE = { up: 1, down: 1, left: 1, right: 1, start: 1, back: 1 };
+    /* Atalho opcional: pode ficar sem tecla nenhuma (a pausa e os resultados
+       tem o botao "Recomeçar"), entao entregar a tecla dele nunca e recusado. */
+    var OPTIONAL = { restart: 1 };
 
     function actionLabel(a) { return BIND_LABEL[a] || a; }
 
@@ -3863,7 +3945,7 @@
 
       /* 1) mesma tecla de novo na mesma linha => PODA */
       if (mine.indexOf(code) >= 0) {
-        if (mine.length <= 1) {
+        if (mine.length <= 1 && !OPTIONAL[action]) {
           bindMsg(kl + ' é a única tecla de “' + esc(actionLabel(action)) +
                   '”. Não dá para remover — a ação ficaria sem controle.', true);
           return false;
@@ -3886,7 +3968,7 @@
             trocar um controle quebrado por outro nao e conserto. */
       var owners = ownersOf(code, action);
       for (i = 0; i < owners.length; i++) {
-        if (bindingList(owners[i]).length <= 1) {
+        if (bindingList(owners[i]).length <= 1 && !OPTIONAL[owners[i]]) {
           bindMsg(kl + ' é a única tecla de “' + esc(actionLabel(owners[i])) +
                   '”. Escolha outra tecla.', true);
           return false;
@@ -3963,7 +4045,9 @@
       'Ligue o metrônomo e toque <b>Enter</b> junto com a batida umas dez vezes — ' +
       'com o teste ligado, <b>Enter</b> é sempre batida. Aperte <b>Esc</b> para parar ' +
       '(a medida fica guardada) e depois <b>aplicar desvio medido</b>: ' +
-      'o jogo compensa sozinho.';
+      'o jogo compensa sozinho.<br>' +
+      '<b>Saída de áudio</b>: <b>Estável</b> (padrão) dá folga contra cortes; ' +
+      '<b>Rápida</b> tem menos atraso, mas pode picotar. Vale após recarregar (F5).';
     var n2 = add(col2, mk('div', 'st-note'));
     n2.innerHTML = '<span class="t">Qualidade</span>' +
       '<b>Ultra</b> liga sombras suaves, bloom largo e SMAA. <b>Baixa</b> desliga sombra e ' +
@@ -3980,11 +4064,10 @@
     var foot = add(pane, mk('div', 'foot'));
     add(foot, mk('p', 'notice',
       'A calibração é o que faz um jogo de ritmo parecer justo: ajuste até a nota bater junto com o som.'));
-    add(foot, mk('div', 'hints',
+    add(add(foot, mk('div', 'hints',
       '<span><b class="key">↑</b><b class="key">↓</b> linha</span>' +
       '<span><b class="key">←</b><b class="key">→</b> valor</span>' +
-      '<span><b class="key">Enter</b> ativar</span>' +
-      '<span><b class="key">Esc</b> voltar</span>'));
+      '<span><b class="key">Enter</b> ativar</span>')), backHint(s));
 
     s.parts = { cols: [col1, col2, col3], head: head, foot: foot, headR: headR };
     s.onEnter = function () {

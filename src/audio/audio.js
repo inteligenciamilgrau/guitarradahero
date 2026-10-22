@@ -130,14 +130,24 @@
    * `setStability` abaixo REESCREVE esse offset sozinho pela diferenca medida
    * em `ctx.baseLatency`, para o jogador nao ter de refazer a calibracao.
    *
-   * O padrao e 'balanced': dobra a folga em relacao ao que estava aqui, com
-   * um acrescimo de latencia que a compensacao automatica absorve. Quem tiver
-   * maquina sobrando escolhe 'interactive'; quem ainda ouvir corte escolhe
-   * 'playback'.
+   * O padrao e 'playback'. Antes era 'balanced', na crenca de que ele dobrava
+   * a folga — MEDIDO no Edge/Chromium do Windows, nao dobra: 'interactive' e
+   * 'balanced' dao o MESMO buffer (10 ms = 3,8 blocos de 128 amostras), e o
+   * jogador continuou ouvindo corte com 165 fps. 'playback' da 20 ms (7,5
+   * blocos), o dobro da folga, por 10 ms de latencia que a compensacao
+   * automatica absorve. Quem tiver maquina sobrando escolhe 'interactive' no
+   * menu (Saida de audio); a escolha explicita do jogador e respeitada.
    * ======================================================================== */
   var STAB_KEY = 'guitarrada-hero.audio.v1';
   var VALID_STAB = { interactive: 1, balanced: 1, playback: 1 };
-  var stability = 'balanced';
+  var DEFAULT_STAB = 'playback';
+  var stability = DEFAULT_STAB;
+  // O jogador escolheu o modo no menu? Sem escolha explicita vale o padrao —
+  // e e assim que quem tinha o 'balanced' antigo salvo migra para o novo.
+  var stabChosen = false;
+  // O hint com que o contexto ATUAL nasceu. Difere de `stability` quando o
+  // jogador escolheu outro modo e ainda nao recarregou a pagina.
+  var stabActive = '';
   // baseLatency (ms) observada da ultima vez que o offset foi compensado.
   // Guardar isto e o que impede a compensacao de ser aplicada duas vezes.
   var stabRefMs = -1;
@@ -148,7 +158,10 @@
       var raw = window.localStorage.getItem(STAB_KEY);
       if (!raw) return;
       var o = JSON.parse(raw);
-      if (o && o.stability && VALID_STAB[o.stability]) stability = o.stability;
+      if (o && o.chosen && o.stability && VALID_STAB[o.stability]) {
+        stability = o.stability;
+        stabChosen = true;
+      }
       if (o && typeof o.refMs === 'number' && isFinite(o.refMs)) stabRefMs = o.refMs;
     } catch (e) { /* localStorage pode nem existir em file:// */ }
   }
@@ -156,7 +169,7 @@
     try {
       if (!window.localStorage) return;
       window.localStorage.setItem(STAB_KEY,
-        JSON.stringify({ stability: stability, refMs: stabRefMs }));
+        JSON.stringify({ stability: stability, refMs: stabRefMs, chosen: stabChosen }));
     } catch (e) {}
   }
   stabLoad();
@@ -203,8 +216,12 @@
   var DEFAULT_SEND = {
     music:  { reverb: 0.16, delay: 0.00 },
     guitar: { reverb: 0.30, delay: 0.32 },
-    drums:  { reverb: 0.14, delay: 0.00 },
-    sfx:    { reverb: 0.22, delay: 0.06 },
+    // Bateria sem reverb global: a sala dela ja vem do sintetizador (gravada
+    // na stem). Com os dois, o eco no bumbo e na caixa ficava dobrado.
+    drums:  { reverb: 0.00, delay: 0.00 },
+    // Efeitos quase secos: o eco nas palhetadas incomodava. So um toque de
+    // sala (era reverb 0.22 + delay 0.06) para os bipes nao soarem "de papel".
+    sfx:    { reverb: 0.06, delay: 0.00 },
     crowd:  { reverb: 0.45, delay: 0.00 }
   };
 
@@ -1020,8 +1037,24 @@
    * EFEITOS SONOROS — tudo sintetizado no instante do disparo
    * ========================================================================== */
 
-  // Acerto de nota: corda pincada afinada pela raia + brilho por qualidade.
-  function sfxHit(lane, quality) {
+  // Afinacao das cordas do acerto, em MIDI (as `freqs` de buildPlucks).
+  var PLUCK_MIDI = [64, 68, 71, 73, 76];
+
+  /* Quanto reafinar uma corda para tocar a nota `midi` da melodia: a nota e
+     dobrada em oitavas para cair a no maximo meio oitava da corda, assim o
+     timbre (Karplus-Strong) quase nao muda. 1 = sem nota (afinacao da raia). */
+  function retune(stringMidi, midi) {
+    if (!(midi > 0)) return 1;
+    var d = midi - stringMidi;
+    d = ((d % 12) + 12) % 12;
+    if (d > 6) d -= 12;
+    return Math.pow(2, d / 12);
+  }
+
+  // Acerto de nota: corda pincada + brilho por qualidade. Com `midi`, a corda
+  // toca a NOTA DA MELODIA (no registro dela); sem, a afinacao fixa da raia —
+  // que e mi pentatonico e brigava com musicas em outros tons.
+  function sfxHit(lane, quality, midi) {
     if (!ctx || !graphOk || !takeVoice()) return;
     var t = now();
     var i = clamp(lane | 0, 0, 4);
@@ -1032,7 +1065,8 @@
     var src = ctx.createBufferSource();
     src.buffer = buf;
     // Micro-variacao de afinacao: duas notas iguais nunca soam identicas.
-    src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.012 + (perfect ? 0.004 : 0);
+    src.playbackRate.value = retune(PLUCK_MIDI[i], midi) *
+      (1 + (Math.random() - 0.5) * 0.012 + (perfect ? 0.004 : 0));
 
     // Corpo: realce medio-baixo simulando a caixa da guitarra.
     var body = filt('peaking', 420, 1.1);
@@ -1061,16 +1095,14 @@
     var pan = makePanner(lanePan(i));
 
     src.connect(body); body.connect(tone); tone.connect(g);
+    // SECA de proposito: sem envio proprio de reverb/delay. O delay de 18%
+    // repetia cada palhetada ("ping... ping") e o jogador pediu sem eco; o
+    // que sobra de ambiente vem so do toque minimo do barramento sfx.
     g.connect(pan.input); pan.output.connect(sfxOut());
-    var sR = sendFrom(g, 'reverb', perfect ? 0.32 : 0.20, 'sfx');
-    var sD = sendFrom(g, 'delay', 0.18, 'sfx');
 
     src.start(t);
     src.stop(t + 0.7);
-    var nodes = [src, body, tone, g, pan.input, pan.output];
-    if (sR) nodes.push(sR);
-    if (sD) nodes.push(sD);
-    releaseAt(nodes, t + 0.75);
+    releaseAt([src, body, tone, g, pan.input, pan.output], t + 0.75);
   }
 
   // Erro: corda abafada raspada. Tem que ser DESAGRADAVEL sem ser estridente —
@@ -1125,11 +1157,14 @@
   // maior 6 da afinacao das raias, por cima da corda solta grave. Limpo e
   // afinado de proposito: a versao anterior (corda grave com drive e um sub
   // que CAIA de tom) soava como erro justo no acerto mais vistoso da pista.
+  // Com `midi` (a fundamental do acorde naquele compasso), a palhetada inteira
+  // e transposta para ele: um mi maior 6 fixo brigava com acorde de la ou re.
   var OPEN_STRUM_GAP = 0.014;
-  function sfxOpenHit() {
+  function sfxOpenHit(midi) {
     if (!ctx || !graphOk || !takeVoice()) return;
     var t = now();
     var nodes = [];
+    var key = retune(40, midi);   /* a palhetada nasce em mi (E2 / E4) */
 
     // soma das cordas: os envios saem daqui, uma vez so
     var mix = ctx.createGain();
@@ -1141,7 +1176,7 @@
       var t0 = t + i * OPEN_STRUM_GAP;
       var src = ctx.createBufferSource();
       src.buffer = pluckBuf[i];
-      src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.008;
+      src.playbackRate.value = key * (1 + (Math.random() - 0.5) * 0.008);
       var tone = filt('lowpass', 6400, 0.7);
       // a palheta perde um pouco de forca atravessando as cordas
       var pk = 0.40 - i * 0.022;
@@ -1162,6 +1197,7 @@
     // corda solta grave (E2), limpa: da o "peso" do bastao sem sujeira
     var low = ctx.createBufferSource();
     low.buffer = pluckOpen || pluckBuf[0];
+    low.playbackRate.value = key;
     var lowTone = filt('lowpass', 2400, 0.7);
     var lowG = ctx.createGain();
     perc(lowG.gain, t, 0.42, 0.003, 0.80);
@@ -1169,10 +1205,7 @@
     low.start(t); low.stop(t + 1.0);
     nodes.push(low, lowTone, lowG);
 
-    var sR = sendFrom(mix, 'reverb', 0.26, 'sfx');
-    var sD = sendFrom(mix, 'delay', 0.10, 'sfx');
-    if (sR) nodes.push(sR);
-    if (sD) nodes.push(sD);
+    // seca, como o acerto normal (sem eco na palhetada)
     releaseAt(nodes, t + 1.1);
   }
 
@@ -1649,10 +1682,11 @@
       // Ver o bloco "ESTABILIDADE DE AUDIO" no topo: o hint NAO muda o DSP,
       // muda quanto tempo a thread de audio tem de folga antes de furar o
       // prazo. Era fixo em 'interactive' (folga minima). Agora e escolha do
-      // jogador, com padrao 'balanced'.
+      // jogador, com padrao 'playback' (o unico que da folga extra no Chromium).
       ctx = new AC({ latencyHint: stability });
+      stabActive = stability;
     } catch (e) {
-      try { ctx = new AC(); } catch (e2) { ctx = null; }
+      try { ctx = new AC(); stabActive = 'padrão do navegador'; } catch (e2) { ctx = null; }
     }
     if (!ctx) { muted = true; return GH.Audio; }
     // Corrige audioOffsetMs pela DIFERENCA de latencia em relacao a
@@ -1850,9 +1884,9 @@
    * Objeto exportado
    * ------------------------------------------------------------------------ */
   var sfxApi = {
-    hit: function (lane, quality) { try { sfxHit(lane, quality); } catch (e) {} },
+    hit: function (lane, quality, midi) { try { sfxHit(lane, quality, midi); } catch (e) {} },
     miss: function () { try { sfxMiss(); } catch (e) {} },
-    openHit: function () { try { sfxOpenHit(); } catch (e) {} },
+    openHit: function (midi) { try { sfxOpenHit(midi); } catch (e) {} },
     starPowerOn: function () { try { sfxStarPowerOn(); } catch (e) {} },
     starPowerOff: function () { try { sfxStarPowerOff(); } catch (e) {} },
     streakUp: function (n) { try { sfxStreakUp(n); } catch (e) {} },
@@ -1914,8 +1948,8 @@
 
     /* ---- ESTABILIDADE DE AUDIO (ver o bloco no topo do arquivo) --------
      * 'interactive' menor latencia, MENOS folga contra underrun
-     * 'balanced'    o padrao: dobra a folga, latencia ainda baixa
-     * 'playback'    maxima folga, para maquina que ainda corta
+     * 'balanced'    no Chromium/Windows da o mesmo buffer do 'interactive'
+     * 'playback'    o padrao: o dobro da folga (20 ms medidos no Edge)
      *
      * O `latencyHint` so pode ser escolhido na CRIACAO do AudioContext, e
      * derrubar o contexto no meio da musica cortaria o som e desancoraria o
@@ -1928,6 +1962,7 @@
       try {
         if (!VALID_STAB[name] || name === stability) return false;
         stability = name;
+        stabChosen = true;
         stabSave();
         return !ctx;   // true = ja vale agora (contexto ainda nao existe)
       } catch (e) { return false; }
@@ -1996,6 +2031,7 @@
   };
 
   Object.defineProperty(GH.Audio, 'stability', { get: function () { return stability; } });
+  Object.defineProperty(GH.Audio, 'stabilityActive', { get: function () { return stabActive; } });
   // Folga da thread de audio, em blocos de 128 amostras. E ISTO que decide se
   // um soluco vira estalo: 2 blocos de folga furam com 5 ms de atraso; 16 nao.
   Object.defineProperty(GH.Audio, 'slackBlocks', {

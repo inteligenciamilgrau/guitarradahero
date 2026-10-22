@@ -1721,9 +1721,11 @@
       headZ = 1.6;
     }
 
-    /* Corta a cauda bem antes do fim da pista: alem disto a neblina ja comeu
-       tudo e so restaria overdraw aditivo. */
-    var tailLimit = LY.SPAWN_Z * 0.62;
+    /* Corta a cauda antes do fim da pista: alem disto a neblina ja comeu
+       tudo e so restaria overdraw aditivo. Era 0,62 — a cauda de uma longa
+       que ainda vem ficava toda atras da gema, espremida pela perspectiva, e
+       o jogador nao via que era longa; com 0,85 ela aparece de longe. */
+    var tailLimit = LY.SPAWN_Z * 0.85;
     if (tailZ < tailLimit) tailZ = tailLimit;
     var len = headZ - tailZ;
     if (len <= 0.02) return;
@@ -1743,13 +1745,19 @@
     if (spVis) _cTmp.copy(SPLOOK.emis);
     else _cTmp.copy(L.core);
     if (dead) _cTmp.lerp(L.dead, 0.74);
+    /* a que ainda vem brilha mais forte que a neblina (fita aditiva) */
+    else if (!held) _cTmp.multiplyScalar(1.4);
 
     /* peso de profundidade: a cauda longe quase nao soma (a fita ja tem o
        `tail` no shader, isto cuida do sustain inteiro que ainda esta longe) */
     var headT = clamp01((headZ - LY.SPAWN_Z) / (LY.STRIKE_Z - LY.SPAWN_Z));
-    var alpha = (held ? 1.15 : 0.86) * vis * birth * deadK * lerp(0.55, 1.0, headT);
-    var hot = held ? 1.0 : (spVis ? 0.45 : 0.16);
-    var w = SUS_W * (held ? 1.16 : 1.0) * (nt.tap ? 0.86 : 1.0);
+    /* A nota longa que AINDA VEM precisa ser lida de longe: com alfa 0,86,
+       atenuacao de ate 45% pela distancia e nucleo quase apagado (0,16), o
+       jogador nem percebia que vinha uma longa. Mais cheia e mais quente,
+       mas ainda um degrau abaixo da que esta sendo segurada. */
+    var alpha = (held ? 1.15 : 1.06) * vis * birth * deadK * lerp(0.82, 1.0, headT);
+    var hot = held ? 1.0 : (spVis ? 0.52 : 0.32);
+    var w = SUS_W * (held ? 1.16 : 1.22) * (nt.tap ? 0.86 : 1.0);
     var h = SUS_H * (held ? 1.24 : 1.0);
 
     pushRibbon(Lribbon, xx, SUS_Y, headZ, w, h, len, null,

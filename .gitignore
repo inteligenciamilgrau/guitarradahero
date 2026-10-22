@@ -17,6 +17,9 @@
 # republicadas. Este projeto e didatico e nao comercial, e nao redistribui
 # material de terceiros.
 refs/
+# referencias/ guarda fotos de referencia (pessoas reais, obras de terceiros)
+# usadas so para orientar a geracao de arte. Nunca vai para o repositorio.
+referencias/
 
 # === Capturas de desenvolvimento ==========================================
 # Milhares de PNGs de avaliacao visual (varias versoes). Nao servem ao jogo,
@@ -59,6 +62,13 @@ assets/audio/*
 !assets/audio/*/
 assets/audio/*/*
 !assets/audio/*/*.mp3
+
+# Sprites do HUD (HTML por cima do canvas; <img>/CSS carregam ate em file://).
+# Hoje: a dancarina de carimbo que aparece quando o jogador segura nota longa.
+!assets/img/
+assets/img/*
+!assets/img/*.png
+!assets/img/*.webp
 
 # === Lixo de sistema e editor =============================================
 node_modules/

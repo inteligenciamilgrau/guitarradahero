@@ -929,6 +929,20 @@
   /* --- acucar sintatico para montar nos sem poluir o codigo ------------- */
   function gain(v) { var g = ctx.createGain(); g.gain.value = v; return g; }
 
+  /* Entrada de barramento com ESTEREO FIXO. A contagem automatica de canais
+     ('max') segue as fontes ativas: o bumbo e mono, chimbal e caixa sao ruido
+     estereo. Cada vez que o ultimo ruido acabava (ou o primeiro comecava), a
+     entrada trocava de 1 para 2 canais e REINICIAVA os nos com estado logo
+     abaixo — saturador sobreamostrado, compressor, filtros, sala — soltando
+     um estalo. Fixando 2 canais, mono so e copiado para os dois lados e nada
+     a jusante muda de forma no meio da musica. */
+  function stereoFixed(node) {
+    node.channelCount = 2;
+    node.channelCountMode = 'explicit';
+    node.channelInterpretation = 'speakers';
+    return node;
+  }
+
   function filt(type, freq, q, gainDb) {
     var f = ctx.createBiquadFilter();
     f.type = type;
@@ -1128,6 +1142,7 @@
 
     /* ============ REVERB DE SALA (bateria, percussao, teclas) ============ */
     var roomSend = gain(0.0);
+    stereoFixed(roomSend);
     var roomConv = ctx.createConvolver();
     roomConv.normalize = true;
     roomConv.buffer = makeRoomIR(1.35, 20260730);
@@ -1295,7 +1310,10 @@
     var drumComp = comp(-16, 4.2, 0.008, 0.14, 6);
     var drumTone = filt('peaking', 4200, 0.8, 1.6);
     var drumOut  = gain(0.78 * MIX);
-    var drumRev  = gain(0.13);
+    /* Sala da bateria mais seca: o jogador achou o eco exagerado, e a stem
+       ja leva esta sala gravada (era 0,13). */
+    var drumRev  = gain(0.08);
+    stereoFixed(drumIn);
     drumIn.connect(drumGlue); drumGlue.connect(drumComp);
     drumComp.connect(drumTone); drumTone.connect(drumOut);
     drumOut.connect(busOut('drums'));
@@ -1309,7 +1327,8 @@
     var percComp = comp(-15, 2.6, 0.010, 0.18, 10);
     var percAir  = filt('highshelf', 7200, 0.7, 1.8);
     var percOut  = gain(0.66 * MIX);
-    var percRev  = gain(0.26);
+    var percRev  = gain(0.20);
+    stereoFixed(percIn);
     percIn.connect(percHP); percHP.connect(percComp);
     percComp.connect(percAir); percAir.connect(percOut);
     percOut.connect(busOut('drums'));
@@ -1657,7 +1676,7 @@
        dois, a conta e a mesma — (a+b+c) entrando num ganho k, em vez de
        (a+b+c) passando por 1.0 e depois por k — e some um no por nota de
        guitarra. */
-    var mix = gain(0.85 + vel * 0.25);
+    var mix = gain((0.85 + vel * 0.25) * (art.trim > 0 ? art.trim : 1));   /* trim: ver chordTrim */
 
     /* --- osciladores --------------------------------------------------- */
     /* O leve desafino entre serra e quadrada cria batimento: e o que faz a
@@ -2274,7 +2293,16 @@
     perc(ckg.gain, t0, 0.11 * vel, 0.0005, 0.006);
     try { ck.start(t0, noiseOffset() * 2.1); ck.stop(t0 + 0.03); } catch (e) {}
 
+    /* MONO FIXO no saturador. O click e ruido ESTEREO e para aos 30 ms; o
+       corpo e o sub sao senoides MONO. Com a contagem automatica, a entrada
+       do saturador caia de 2 para 1 canal quando o click acabava, e a troca
+       REINICIA o sobreamostrador do WaveShaper (o mesmo efeito do bloco
+       "APOSENTAR CEDO A EXCITACAO" la em cima): um degrau de ~0,25 no meio
+       do grave, ~37 ms depois de cada batida. Medido na stem da bateria —
+       era o "estouro no bumbo" que o jogador ouvia. */
     var sat = shaper(curves.glue, '2x');
+    sat.channelCount = 1;
+    sat.channelCountMode = 'explicit';
     og.connect(sat); sg.connect(sat); ckg.connect(sat);
     var out = gain(0.95);
     sat.connect(out); out.connect(dest);
@@ -3381,6 +3409,35 @@
     return s[lo];
   }
 
+  /* BEND DENTRO DA ESCALA. O bend era sorteado "um tom ou meio tom" sem
+     olhar a escala: a terca de La mixolidio subia um tom e chegava num re#
+     que nao existe ali. Agora a nota de CHEGADA tem que estar na escala do
+     momento (a do acorde vigente — ver makeSlot/scaleForChord). Tenta o
+     tamanho sorteado, depois o outro, depois um tom e meio; nenhum cai na
+     escala: sem bend. Devolve cents (100, 200, 300) ou 0. */
+  /* NIVEL DE ACORDE. As vozes de um ataque somam ANTES do amp valvulado
+     (gtrAmp, um WaveShaper): duas notas chegavam com o dobro da amplitude
+     de uma, passavam de 1,0 na entrada do amp e o WaveShaper cortava seco.
+     Medido na entrada do amp: nota sozinha ~0,5 de mediana; duas ou tres
+     notas ~1,0, com picos de 1,3 — era a "distorcao quando toca duas notas
+     juntas". Cada voz de um acorde entra mais baixa, para a SOMA ficar no
+     nivel de uma nota: o amp continua colorindo, mas nao corta. */
+  function chordTrim(voices) {
+    return voices <= 1 ? 1 : (voices === 2 ? 0.56 : 0.48);
+  }
+
+  function bendInScale(midi, slot, wantWhole) {
+    var sc = slot ? SCALES[slot.scaleName] : null;
+    if (!sc) { return 0; }
+    var root = slot.scaleRootPc;
+    var order = wantWhole ? [2, 1, 3] : [1, 2, 3];
+    for (var k = 0; k < order.length; k++) {
+      var pc = ((midi + order[k] - root) % 12 + 12) % 12;
+      if (sc.indexOf(pc) >= 0) { return order[k] * 100; }
+    }
+    return 0;
+  }
+
   /* ---------------------------------------------------------------------
    * Tessituras. Cada instrumento tem a sua; e o que impede o baixo de
    * invadir o teclado e a guitarra de sumir embaixo dos metais.
@@ -3850,17 +3907,28 @@
         art.slideTime = clamp(rest * 0.5, 0.03, 0.12);
       }
 
-      /* Bend nas notas seguradas — a assinatura do fraseado paraense. */
+      /* Bend nas notas seguradas — a assinatura do fraseado paraense —,
+         sempre terminando numa nota da escala. Os tres sorteios acontecem
+         na mesma ordem de antes, com ou sem bend: o resto do arranjo nao
+         muda uma nota. */
       if (!open && hold >= 0.34 && rng() < 0.42) {
-        art.bend = (rng() < 0.68) ? 200 : 100;
-        art.bendFrom = 0;
-        art.bendDelay = clamp(hold * 0.18, 0.03, 0.2);
-        art.bendTime = clamp(hold * 0.3, 0.06, 0.25);
-        art.bendRelease = (rng() < 0.4);
+        var bWhole = rng() < 0.68;
+        var bRel = rng() < 0.4;
+        var bAmt = bendInScale(midis[0], slotAt(harm, t), bWhole);
+        if (bAmt) {
+          art.bend = bAmt;
+          art.bendFrom = 0;
+          art.bendDelay = clamp(hold * 0.18, 0.03, 0.2);
+          art.bendTime = clamp(hold * 0.3, 0.06, 0.25);
+          art.bendRelease = bRel;
+        }
       }
       art.vib = hold > 0.22;
       art.vibDelay = clamp(hold * 0.3, 0.10, 0.4);
       art.vibDepth = 20 + Math.floor(rng() * 16);
+      /* todas as vozes deste ataque dividem a entrada do amp */
+      var trim = chordTrim(Math.min(midis.length, 4) + (open ? 1 : 0));
+      art.trim = trim;
 
       pushEv(events, t, 'guitar', midis[0], vel, hold, art);
       used++;
@@ -3870,14 +3938,14 @@
       for (var j = 1; j < midis.length && j < 4; j++) {
         pushEv(events, t + j * 0.004, 'guitar', midis[j],
           clamp(vel * (0.84 - (j - 1) * 0.08), 0.2, 1.1), hold,
-          { vib: art.vib, vibDelay: art.vibDelay, vibDepth: art.vibDepth });
+          { vib: art.vib, vibDelay: art.vibDelay, vibDepth: art.vibDepth, trim: trim });
       }
 
       /* Nota aberta ganha a quinta por baixo: peso de acorde de potencia
          atravessando a pista inteira. */
       if (open) {
         pushEv(events, t + 0.008, 'guitar', midis[0] + 7,
-          clamp(vel * 0.8, 0.2, 1.1), Math.max(hold, 0.28), { vib: false });
+          clamp(vel * 0.8, 0.2, 1.1), Math.max(hold, 0.28), { vib: false, trim: trim });
       }
 
       prevMidi = midis[midis.length - 1];
@@ -3967,9 +4035,9 @@
       if (grp.open) {
         var rootLow = theory.nearestPcMidi(slot.rootPc, 45, 38, 54);
         pushEv(events, gt, 'guitar', rootLow, clamp(vel * 1.06, 0.4, 1.2), Math.max(hold, 0.28),
-          { vib: hold > 0.5, vibDelay: 0.24 });
+          { vib: hold > 0.5, vibDelay: 0.24, trim: chordTrim(2) });
         pushEv(events, gt + 0.008, 'guitar', rootLow + 7, clamp(vel * 0.82, 0.3, 1.1),
-          Math.max(hold, 0.28), { vib: false });
+          Math.max(hold, 0.28), { vib: false, trim: chordTrim(2) });
         prevMidi = rootLow;
         prevLane = -1;
         prevT = gt;
@@ -4040,13 +4108,19 @@
         art.slideFrom = prevMidi;
         art.slideTime = clamp(rest * 0.5, 0.03, 0.12);
       }
-      /* Bend nas notas longas: a marca registrada do fraseado paraense. */
+      /* Bend nas notas longas: a marca registrada do fraseado paraense,
+         chegando sempre numa nota da escala (mesma ordem de sorteios). */
       if (hold >= 0.34 && rng() < 0.42) {
-        art.bend = (rng() < 0.68) ? 200 : 100;   /* um tom ou meio tom */
-        art.bendFrom = 0;
-        art.bendDelay = clamp(hold * 0.18, 0.03, 0.2);
-        art.bendTime = clamp(hold * 0.3, 0.06, 0.25);
-        art.bendRelease = (rng() < 0.4);
+        var bWhole2 = rng() < 0.68;
+        var bRel2 = rng() < 0.4;
+        var bAmt2 = bendInScale(midi, slot, bWhole2);
+        if (bAmt2) {
+          art.bend = bAmt2;
+          art.bendFrom = 0;
+          art.bendDelay = clamp(hold * 0.18, 0.03, 0.2);
+          art.bendTime = clamp(hold * 0.3, 0.06, 0.25);
+          art.bendRelease = bRel2;
+        }
       }
       /* Vibrato entra sozinho nas notas seguradas (ver playGuitar). */
       art.vib = hold > 0.22;
@@ -4057,6 +4131,9 @@
         art.palm = true;
       }
 
+      /* todas as vozes deste ataque dividem a entrada do amp (ver chordTrim) */
+      var gTrim = chordTrim(Math.min(lanes.length, 4));
+      art.trim = gTrim;
       pushEv(events, gt, 'guitar', midi, vel, hold, art);
 
       /* ---- acordes: terca/sexta ou triade ---- */
@@ -4065,7 +4142,7 @@
         var iv = (rng() < 0.72) ? 2 : 5;   /* graus da escala */
         var j2 = clamp(idx + iv, 0, ladder.length - 1);
         pushEv(events, gt + 0.004, 'guitar', ladder[j2], clamp(vel * 0.80, 0.3, 1.05),
-          hold, { vib: art.vib, vibDelay: art.vibDelay, vibDepth: art.vibDepth });
+          hold, { vib: art.vib, vibDelay: art.vibDelay, vibDepth: art.vibDepth, trim: gTrim });
       } else if (lanes.length >= 3) {
         /* Tres ou mais = triade do acorde vigente, subindo a partir da nota. */
         var used = 1;
@@ -4073,7 +4150,7 @@
           if (cIdx[c2] <= idx) { continue; }
           pushEv(events, gt + 0.004 * used, 'guitar', ladder[cIdx[c2]],
             clamp(vel * (0.82 - used * 0.08), 0.25, 1.05), hold,
-            { vib: false });
+            { vib: false, trim: gTrim });
           used++;
         }
       }

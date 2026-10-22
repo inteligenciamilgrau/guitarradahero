@@ -719,8 +719,19 @@
     }
   }
 
+  /* Trechos da musica com Star Power ligado, para o grafico de desempenho
+   * dos resultados mostrar o multiplicador DOBRADO (ate 8x) onde ele valeu.
+   * `b` fica -1 enquanto o trecho esta aberto. */
+  var _spSpans = [];
+  function spSpanOpen(t) { _spSpans.push({ a: t, b: -1 }); }
+  function spSpanClose(t) {
+    var s = _spSpans[_spSpans.length - 1];
+    if (s && s.b < 0) s.b = Math.max(s.a, t);
+  }
+
   function deactivateStarPower(t, silent) {
     if (!S.starPowerActive) return;
+    spSpanClose(t);
     S.starPowerActive = false;
     S.multiplier = computeMultiplier();
     S.starPowerReady = false;
@@ -927,6 +938,7 @@
       _absorbStrumUntil = -1e9;
       _lastOverstrum = null;
       _sustains.length = 0;
+      _spSpans.length = 0;
       _scoreF = 0;
       _sustainPts = 0;
       _deltas.length = 0;
@@ -1102,6 +1114,7 @@
       if (this.starPowerActive) return false;         // nao reativa enquanto ativo
       if (this.starPower < SP_ACTIVATE_MIN) return false;
       if (this.failed) return false;
+      spSpanOpen(_songTime);
       this.starPowerActive = true;
       this.multiplier = computeMultiplier();
       this.starPowerReady = false;
@@ -1234,6 +1247,15 @@
      * Consulta do estado de julgamento (o agente de NOTAS usa para saber o
      * que ja foi acertado sem precisar guardar estado proprio).
      * -------------------------------------------------------------------*/
+    /* Trechos com Star Power ligado [{a, b}] (copia; trecho ainda aberto
+       termina no instante atual). */
+    starPowerSpans: function () {
+      var out = [];
+      for (var i = 0; i < _spSpans.length; i++) {
+        out.push({ a: _spSpans[i].a, b: _spSpans[i].b < 0 ? _songTime : _spSpans[i].b });
+      }
+      return out;
+    },
     groupJudged: function (gi) { return _gJudged && gi >= 0 && gi < _gJudged.length ? _gJudged[gi] === 1 : false; },
     groupResult: function (gi) {
       if (!_gResult || gi < 0 || gi >= _gResult.length) return 'none';
@@ -1272,6 +1294,8 @@
       }
       if (typeof o.starPower === 'number') this.starPower = clamp(o.starPower, 0, 1);
       if (typeof o.starPowerActive === 'boolean') {
+        if (o.starPowerActive && !this.starPowerActive) spSpanOpen(_songTime);
+        else if (!o.starPowerActive && this.starPowerActive) spSpanClose(_songTime);
         this.starPowerActive = o.starPowerActive;
         setSynthStarPower(o.starPowerActive);
       }
@@ -1318,6 +1342,7 @@
            * seu momento mais bonito. */
           if (o.useStarPower !== false && !this.starPowerActive &&
               this.starPower >= SP_ACTIVATE_MIN) {
+            spSpanOpen(g.t);
             this.starPowerActive = true;
             this.multiplier = computeMultiplier();
             setSynthStarPower(true);

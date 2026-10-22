@@ -6,20 +6,21 @@
    ensina tocando, uma regra de cada vez:
      1. os trastes          cada cor e uma tecla
      2. a palhetada         a outra mao
-     3. primeira nota       segurar + palhetar na linha
-     4. trocando de cor     as cinco raias
-     5. o bastao            nota aberta: palhetar sem traste
-     6. notas longas        sustain: segurar ate o rabo acabar
-     7. acordes             duas teclas, uma palhetada
-     8. star power          encher o medidor e ativar
-   As duas primeiras sao so de teclado (nada desce pela pista). As outras sao
+     3. as duas maos        segurar + palhetar junto, 3 vezes seguidas
+     4. primeira nota       segurar + palhetar na linha
+     5. trocando de cor     as cinco raias
+     6. o bastao            nota aberta: palhetar sem traste
+     7. notas longas        sustain: segurar ate o rabo acabar
+     8. acordes             duas teclas, uma palhetada
+     9. star power          encher o medidor e ativar
+   As tres primeiras sao so de teclado (nada desce pela pista). As outras sao
    musicas curtas montadas por GH.Songs.compose(): a banda toca de verdade e a
    licao so passa quando o jogador bate a meta — senao, explica e repete.
 
    FLUXO (o GH.Game empresta o palco — secao 8B de game.js)
      card  explicacao na tela, palco vazio (GH.Game.clearStage): o jogador
            aperta trastes e palheta a vontade sem nada ser julgado
-     play  GH.Game.startSong(licao) com contagem; faixa compacta no topo e um
+     play  GH.Game.startSong(licao) sem contagem; faixa compacta no topo e um
            "treinador" que explica cada erro na hora
      fim   update() ve a licao acabar, mede e volta para o card — da proxima
            licao (com o parabens) ou da mesma (com a dica)
@@ -41,7 +42,18 @@
   var FIRST = BAR;               /* um compasso de banda antes da primeira nota */
   var END_PAD = 1.0;             /* respiro depois do ultimo ataque antes de medir */
   var DIFF = 'facil';            /* a janela de acerto mais generosa do jogo */
-  var PROG = ['A7', 'D9', 'E7', 'A7'];
+
+  /* Harmonia funcional em La maior: I, IV, V7. Cada licao TERMINA na tonica:
+     contando do ultimo compasso para tras, I <- V7 <- IV <- I ...; o primeiro
+     compasso (so banda, antes das notas) fica sempre na tonica. A ultima
+     nota da licao cai num compasso de I e resolve. */
+  var CHORD = { I: 'A', IV: 'D', V: 'E7' };
+  var CADENCE = [CHORD.I, CHORD.V, CHORD.IV, CHORD.I];
+  function progression(bars) {
+    var out = [];
+    for (var b = 0; b < bars; b++) out.push(b === 0 ? CHORD.I : CADENCE[(bars - 1 - b) % 4]);
+    return out;
+  }
 
   var NEXT_DELAY = 1.2;          /* licao de teclado cumprida -> proxima */
   var COACH_GAP = 2.2;           /* intervalo minimo entre duas dicas */
@@ -84,7 +96,18 @@
       done: 'Boa! Pra tocar você usa as duas mãos: <b>traste + palhetada</b>.'
     },
     {
+      /* A parte que mais confunde quem nunca jogou: as duas maos AO MESMO
+         TEMPO. Treina sem nota nenhuma antes de pedir isso na pista. */
+      kind: 'combo',
+      title: 'As duas mãos juntas',
+      body: 'O segredo de toda nota: <b>segure {f0}</b> e, sem soltar, <b>palhete {strum}</b>.',
+      need: 3,
+      goal: 'Acerte 3 vezes seguidas',
+      done: 'Isso! Segurar e palhetar ao mesmo tempo: é assim que toda nota sai.'
+    },
+    {
       kind: 'song',
+      firstNote: true,
       title: 'Sua primeira nota',
       body: 'As notas descem pela pista. Quando a nota <c0>verde</c0> encostar no círculo verde, ' +
             '<b>segure {f0} e palhete {strum}</b>.',
@@ -285,13 +308,13 @@
       tribute: 'Aula de guitarrada — lição ' + (i + 1) + ' de ' + LESSONS.length,
       genre: 'Aula',
       bpm: BPM, timeSig: [4, 4], year: 2026, palette: 'para', seed: 0x7E7A00 + i,
-      key: 'A', scale: 'mixolydian', soloScale: 'mixolydian', pool: 'guitarrada',
+      key: 'A', scale: 'major', soloScale: 'major', pool: 'guitarrada',
       stars: { facil: 1, medio: 1, dificil: 1, guitarrada: 1 },
       drumPattern: 'rock', drumVariant: 'guitarrada-marcha', bassPattern: 'guitarrada-drive',
       percussion: ['ganza', 'agogo'],
       instruments: { guitar: 'guitarrada-clean', bass: 'round-wound', keys: 'organ-soft', brass: false },
       cover: { hue: 26, hue2: 176, motif: 'guitar-wave', subtitle: 'Aula de guitarrada' },
-      sections: [[L.title, bars, PROG, { intensity: 0.40, dyn: 'mp', pads: true, brass: false, stops: [] }]]
+      sections: [[L.title, bars, progression(bars), { intensity: 0.40, dyn: 'mp', pads: true, brass: false, stops: [] }]]
     }, notes);
     s.tutorial = true;
     s.autoStarPower = false;       /* SP so na licao de SP */
@@ -393,6 +416,10 @@
     '#gh-tut .tu-tips li::before{content:"";position:absolute;left:.4vmin;top:.5em;width:.95vmin;height:.95vmin;',
     'transform:rotate(45deg);background:linear-gradient(135deg,var(--gh-gold,#ffcf4a),var(--gh-ui-accent,#ff3d8a))}',
 
+    /* dica viva da licao das duas maos; a altura minima segura o layout */
+    '#gh-tut .tu-tip{min-height:1.5em;margin-top:1.4vmin;font-weight:700;color:#ffd58a;',
+    'font-size:clamp(11px,1.8vmin,19px);line-height:1.5}',
+    '#gh-tut .tu-tip .tu-k{font-size:.86em;height:1.6em;min-width:1.8em;margin:0 .1em;vertical-align:.04em}',
     '#gh-tut .tu-goal{margin-top:1.8vmin;font-size:clamp(9px,1.45vmin,16px);letter-spacing:.2em;',
     'text-transform:uppercase;font-weight:800;color:var(--gh-textDim,#95a0c0)}',
     '#gh-tut .tu-go{margin-top:1.7vmin;font-weight:800;font-size:clamp(12px,2.1vmin,23px);color:#fff;',
@@ -479,10 +506,12 @@
       h += '<div class="tu-task">';
       for (var f = 0; f < 5; f++) h += fmt('{f' + f + '}');
       h += '</div>';
-    } else if (L.kind === 'strum') {
-      h += '<div class="tu-task">' + fmt('{strum}') + '<span class="tu-dots">';
+    } else if (L.kind === 'strum' || L.kind === 'combo') {
+      h += '<div class="tu-task">' + fmt(L.kind === 'combo' ? '{f0}<i>+</i>{strum}' : '{strum}') +
+           '<span class="tu-dots">';
       for (var d = 0; d < L.need; d++) h += '<span class="tu-dot"></span>';
       h += '</span></div>';
+      if (L.kind === 'combo') h += '<p class="tu-tip"></p>';
     } else if (L.task) {
       h += '<div class="tu-task">' + fmt(L.task) + '</div>';
     }
@@ -509,8 +538,10 @@
 
     N.keys = N.card.querySelectorAll('.tu-task .tu-k');
     N.dots = N.card.querySelectorAll('.tu-dot');
+    N.tip = N.card.querySelector('.tu-tip');
     step = 0;
     nextAt = -1;
+    comboPendingAt = 0;
     /* a dica da licao que acabou ja esta no aviso do card; o balao sai */
     N.coach.className = 'tu-coach';
     coachUntil = -1;
@@ -526,9 +557,15 @@
         N.keys[i].classList.toggle('ok', i < step);
         N.keys[i].classList.toggle('cur', i === step);
       }
-    } else if (kind === 'strum') {
+    } else if (kind === 'strum' || kind === 'combo') {
       for (i = 0; i < N.dots.length; i++) N.dots[i].classList.toggle('on', i < step);
     }
+  }
+
+  function tapKey(k) {
+    if (!k) return;
+    k.classList.add('tap');
+    setTimeout(function () { k.classList.remove('tap'); }, 110);
   }
 
   function nudge(el) {
@@ -586,7 +623,8 @@
     coachAt = -1e9;
     showBar();
     sfx('uiSelect');
-    GH.Game.startSong(lessonSong(idx), DIFF);
+    /* sem 3-2-1: o card ja foi a preparacao, a palhetada ja foi o "vai" */
+    GH.Game.startSong(lessonSong(idx), DIFF, { countdown: false });
   }
 
   /* Ataques acertados no chart carregado (antes de o palco ser limpo). */
@@ -629,10 +667,48 @@
     mcall('Highway', 'pulse', 1.1);
   }
 
+  /* ---------------------------------------- licao "as duas maos juntas" */
+  /* Palhetada que chegou um triz ANTES da tecla: quem aperta as duas "juntas"
+     quase nunca acerta o mesmo milissegundo. O proprio jogo da 60 ms de folga
+     (GH.Input); aqui 90 ms, para o iniciante nao ser punido por isso. */
+  var COMBO_GRACE_MS = 90;
+  var comboPendingAt = 0;
+
+  function comboHit() {
+    comboPendingAt = 0;
+    step++;
+    markStep();
+    tapKey(N.keys[1]);
+    mcall('FX', 'hit', 0, 'perfect');
+    sfx('hit', 0, 'perfect');
+    if (N.tip) N.tip.innerHTML = step < 3 ? fmt('Isso! Mais ' + (3 - step) + (3 - step === 1 ? ' vez' : ' vezes') + ', sem errar.') : '';
+    if (step >= lessonAt(idx).need) completeKeyboardLesson();
+  }
+
+  function comboMiss() {
+    comboPendingAt = 0;
+    var held = heldMask();
+    var restart = step > 0;
+    step = 0;
+    markStep();
+    nudge(N.keys[0]);
+    sfx('uiBack');
+    var why = held === 0 ? 'Faltou segurar {f0}! Segure e, sem soltar, palhete {strum}.'
+            : (held & 1) ? 'Segure só o {f0} — solte as outras teclas.'
+            : 'Essa não é a tecla verde: segure {f0} e palhete {strum}.';
+    if (N.tip) N.tip.innerHTML = fmt(why + (restart ? ' A contagem recomeçou: tem que ser 3 seguidas.' : ''));
+  }
+
   /* ------------------------------------------------------- entrada */
   function onFretDown(lane) {
     if (!active || phase !== 'card' || nextAt >= 0) return;
-    if (lessonAt(idx).kind !== 'frets') return;
+    var kind = lessonAt(idx).kind;
+    if (kind === 'combo') {
+      if (lane === 0 && comboPendingAt && performance.now() - comboPendingAt <= COMBO_GRACE_MS &&
+          heldMask() === 1) comboHit();
+      return;
+    }
+    if (kind !== 'frets') return;
     if (lane !== step) { nudge(N.keys[step]); return; }
     mcall('FX', 'hit', lane, 'perfect');
     sfx('uiMove');
@@ -646,9 +722,18 @@
     if (info && info.buffered) return;
     if (!GH.Game || GH.Game.state !== 'playing') return;
     var L = lessonAt(idx);
+    if (L.kind === 'combo') {
+      tapKey(N.keys[1]);
+      if (heldMask() === 1) { comboHit(); return; }
+      /* sem a tecla (ainda): espera a folga antes de chamar de erro */
+      var at = comboPendingAt = performance.now();
+      setTimeout(function () {
+        if (active && comboPendingAt === at && lessonAt(idx).kind === 'combo') comboMiss();
+      }, COMBO_GRACE_MS + 10);
+      return;
+    }
     if (L.kind === 'strum') {
-      var k = N.keys[0];
-      if (k) { k.classList.add('tap'); setTimeout(function () { k.classList.remove('tap'); }, 110); }
+      tapKey(N.keys[0]);
       mcall('Highway', 'pulse', 0.8);
       sfx('uiMove');
       step++;
@@ -716,7 +801,7 @@
     if (e.type === 'hit') {
       hits++;
       updateCount();
-      if (hits === 1 && idx === 2) coach('Isso! É assim que se toca.', true);
+      if (hits === 1 && L.firstNote) coach('Isso! É assim que se toca.', true);
       return;
     }
 
@@ -789,6 +874,8 @@
 
   GH.Tutorial = {
     lessons: LESSONS,
+    /* a musica de uma licao (ferramentas conferem melodia e harmonia) */
+    songFor: function (i) { return lessonSong(i); },
 
     begin: function () {
       if (!GH.Songs || typeof GH.Songs.compose !== 'function') return false;
@@ -819,6 +906,10 @@
           for (var i = 0; i < N.keys.length; i++) {
             N.keys[i].classList.toggle('down', !!(GH.Input && GH.Input.isFret && GH.Input.isFret(i)));
           }
+        } else if (L.kind === 'combo' && N.keys && N.keys[0]) {
+          /* a tecla verde afunda enquanto esta segurada: o jogador VE que
+             esta segurando na hora de palhetar */
+          N.keys[0].classList.toggle('down', !!(GH.Input && GH.Input.isFret && GH.Input.isFret(0)));
         }
         if (nextAt >= 0 && clock >= nextAt) {
           flash = { kind: 'ok', html: '&#10003; ' + L.done };

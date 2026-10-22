@@ -169,6 +169,12 @@
   var chartCursor = 0;
   var chartSig = '';
 
+  /* janela de dedos (Facil/Medio): song.laneWindows[dificuldade] */
+  var lwList = null;           /* [{t, lo, hi}] ou null */
+  var lwCur = -1;              /* indice da janela valendo na linha de acerto */
+  var lwOpenEnd = 0;           /* ate quando valem as setas da abertura */
+  var laneAct = [1, 1, 1, 1, 1];       /* 1 = raia em uso, amortecido */
+
   /* objetos three (preenchidos em build*) */
   var deck = null, deckMat = null;
   var laneBleed = [], laneLit = [];
@@ -181,6 +187,9 @@
   var strike = null;           /* {bar, barMat, edge, edgeMat, glow, glowMat} */
   var frets = [];              /* {group, bezel, core, coreMat, halo, haloMat, burst, burstMat} */
   var decals = null;           /* QuadBatch: reflexos + pulsos */
+  var lwShade = null;          /* QuadBatch: sombra das raias fora da janela */
+  var lwArrowSide = null;      /* QuadBatch: setas laterais logo abaixo dos aros */
+  var lwArrowFwd = null;       /* QuadBatch: setas para frente (janela de abertura) */
   var spWash = null, spWashMat = null;
   var spEdge = [];             /* faixas de energia nas bordas */
   var farFade = null, farFadeMat = null;
@@ -1416,6 +1425,64 @@
   }
 
   /* ========================================================================
+   * 12B. CONSTRUCAO — JANELA DE DEDOS (Facil / Medio)
+   * No Facil e no Medio o chart usa 3 ou 4 raias que mudam de lugar depois de
+   * cada frase de Star Power. A pista mostra isso sem texto: as raias fora da
+   * janela ficam na sombra (e a fronteira desce junto com as notas), e perto
+   * da troca setas piscam logo abaixo dos aros da janela nova, apontando para
+   * onde a mao vai. Na janela de abertura elas apontam PARA FRENTE.
+   * ====================================================================== */
+
+  /* seta em "V" deitado; up = true aponta para o fundo da pista */
+  function chevronTexture(up) {
+    var c = document.createElement('canvas');
+    c.width = 128; c.height = 128;
+    var g = c.getContext('2d');
+    g.strokeStyle = '#ffffff';
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.shadowColor = '#ffffff';
+    function chev(w, a) {
+      g.globalAlpha = a;
+      g.lineWidth = w;
+      g.beginPath();
+      if (up) { g.moveTo(20, 86); g.lineTo(64, 38); g.lineTo(108, 86); }
+      else { g.moveTo(42, 20); g.lineTo(90, 64); g.lineTo(42, 108); }
+      g.stroke();
+    }
+    g.shadowBlur = 22; chev(30, 0.30);
+    g.shadowBlur = 8; chev(17, 1);
+    var tex = new THREE.CanvasTexture(c);
+    ownedTex.push(tex);
+    return tex;
+  }
+
+  function arrowMat(up) {
+    return keepMat(new THREE.MeshBasicMaterial({
+      map: chevronTexture(up), transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+      vertexColors: true, toneMapped: false, side: THREE.DoubleSide
+    }));
+  }
+
+  function buildLaneWindow() {
+    var shadeMat = keepMat(new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 1,
+      blending: THREE.NormalBlending, depthWrite: false, fog: false,
+      vertexColors: true, toneMapped: false, side: THREE.DoubleSide
+    }));
+    /* depois das linhas de batida/compasso (4-5), antes das gems acesas */
+    lwShade = QuadBatch(64, shadeMat, 6);
+    group.add(lwShade.mesh);
+
+    /* depois do brilho dos aros: as setas ficam por cima da pista */
+    lwArrowSide = QuadBatch(LANES, arrowMat(false), 15);
+    lwArrowFwd = QuadBatch(LANES, arrowMat(true), 15);
+    group.add(lwArrowSide.mesh);
+    group.add(lwArrowFwd.mesh);
+  }
+
+  /* ========================================================================
    * 13. CONSTRUCAO — CAMADA DE STAR POWER
    * ====================================================================== */
 
@@ -1483,6 +1550,12 @@
     if (sig !== chartSig) {
       chartSig = sig;
       chartCursor = 0;
+      var lw = Ch.song && Ch.song.laneWindows;
+      lwList = (lw && lw[Ch.difficulty] && lw[Ch.difficulty].length) ? lw[Ch.difficulty] : null;
+      lwCur = -1;
+      lwArrowK = -1;
+      lwArrowA = 0;
+      lwOpenEnd = Math.max(notes[0].t + 0.6, 3.0);
     }
     if (chartCursor > 0 && chartCursor <= notes.length && notes[chartCursor - 1] &&
         notes[chartCursor - 1].t > t + 0.35) {
@@ -1748,8 +1821,9 @@
 
       /* respiracao lenta no idle — nunca parado, nunca linear */
       var breath = 0.5 + 0.5 * Math.sin(elapsed * 1.55 + i * 0.82);
-      var idle = 0.62 + 0.16 * breath;
-      var lit = idle + laneHold[i] * 1.25 + laneHit[i] * 1.4 + pulseLevel * 0.20;
+      /* aro fora da janela de dedos (Facil/Medio) descansa apagado */
+      var idle = (0.62 + 0.16 * breath) * (0.30 + 0.70 * laneAct[i]);
+      var lit = idle + laneHold[i] * 1.25 + laneHit[i] * 1.4 + pulseLevel * 0.20 * laneAct[i];
 
       _c1.copy(f.coreBase);
       if (spLevel > 0.01) _c1.lerp(spCol('glow', 0x8fd8ff), spLevel * 0.48);
@@ -1866,6 +1940,102 @@
     }
 
     decals.end();
+  }
+
+  /* ---- janela de dedos: sombra fora da janela + setas na troca ---- */
+  var LW_SHADE_A = 0.62;       /* sombra maxima sobre a raia fora de uso */
+  var LW_Z_END = -0.55;        /* a sombra para antes do aro (ele apaga sozinho) */
+
+  function lwShadeA(z) {
+    return LW_SHADE_A * smoothstep(LW_Z_END, -1.9, z) * (1 - 0.55 * smoothstep(-26, -50, z));
+  }
+
+  var LW_ARROW_LEAD = 1.8;     /* s antes da troca em que as setas acendem */
+  var LW_ARROW_TAIL = 1.0;     /* e quanto ficam depois dela */
+  var LW_ARROW_Z = 0.82;       /* logo abaixo dos aros (lado do jogador) */
+  var lwArrowK = -1;           /* janela cujas setas estao na tela */
+  var lwArrowA = 0;            /* envelope 0..1 das setas */
+
+  function updateLaneWindows(dt, t) {
+    if (!lwShade || !lwArrowSide || !lwArrowFwd) return;
+    var i, k;
+    lwShade.begin();
+    lwArrowSide.begin();
+    lwArrowFwd.begin();
+    if (!lwList) {
+      for (i = 0; i < LANES; i++) laneAct[i] = damp(laneAct[i], 1, 6, dt);
+      lwArrowA = 0;
+      lwShade.end();
+      lwArrowSide.end();
+      lwArrowFwd.end();
+      return;
+    }
+
+    var cur = 0;
+    while (cur + 1 < lwList.length && lwList[cur + 1].t <= t) cur++;
+    if (lwCur >= 0 && cur > lwCur) {
+      /* a troca chegou na linha de acerto: os aros da janela nova acendem */
+      for (i = lwList[cur].lo; i <= lwList[cur].hi; i++) laneHit[i] = Math.max(laneHit[i], 0.8);
+      pulse(0.55);
+    }
+    lwCur = cur;
+    for (i = 0; i < LANES; i++) {
+      var on = i >= lwList[cur].lo && i <= lwList[cur].hi;
+      laneAct[i] = damp(laneAct[i], on ? 1 : 0, 7, dt);
+    }
+
+    var lay = LAY();
+    var y = Y.divider - 0.002;
+    for (k = cur; k < lwList.length; k++) {
+      var zN = (k === cur) ? LW_Z_END : Math.min(LW_Z_END, zOfTime(t, lwList[k].t));
+      var zF = (k + 1 < lwList.length) ? Math.max(FAR_Z, zOfTime(t, lwList[k + 1].t)) : FAR_Z;
+      if (zN <= FAR_Z) break;
+      if (zF >= zN) continue;
+      for (i = 0; i < LANES; i++) {
+        if (i >= lwList[k].lo && i <= lwList[k].hi) continue;
+        var x0 = lay.laneX(i) - LANE_W * 0.5, x1 = x0 + LANE_W;
+        /* em pedacos, para o alfa seguir a profundidade (o lote so
+         * interpola entre as duas pontas de cada retangulo) */
+        for (var z0 = zN; z0 > zF + 1e-3;) {
+          var z1 = Math.max(zF, z0 - (z0 > -2.5 ? 1.4 : 6.0));
+          lwShade.push(x0, x1, z0, z1, y, 0.010, 0.005, 0.018, lwShadeA(z0), lwShadeA(z1));
+          z0 = z1;
+        }
+      }
+    }
+
+    /* setas logo abaixo dos aros da janela nova, piscando perto de cada troca;
+       na abertura (ate a primeira nota) apontam para frente */
+    var show = -1;
+    for (k = 1; k < lwList.length; k++) {
+      if (t >= lwList[k].t - LW_ARROW_LEAD && t < lwList[k].t + LW_ARROW_TAIL) { show = k; break; }
+    }
+    if (show < 0 && t < lwOpenEnd) show = 0;
+    if (show >= 0) lwArrowK = show;
+    lwArrowA = damp(lwArrowA, show >= 0 ? 1 : 0, show >= 0 ? 14 : 7, dt);
+    if (lwArrowA > 0.01 && lwArrowK >= 0 && lwArrowK < lwList.length) {
+      var w = lwList[lwArrowK];
+      var dir = lwArrowK === 0 ? 0 : (w.lo >= lwList[lwArrowK - 1].lo ? 1 : -1);
+      var blink = 0.25 + 0.75 * Math.pow(0.5 + 0.5 * Math.sin(elapsed * 13), 1.5);
+      var a = lwArrowA * blink;
+      var sx = LANE_W * 0.36;
+      var zN = LW_ARROW_Z + 0.30, zF = LW_ARROW_Z - 0.30;
+      var ay = Y.pulse + 0.002;
+      for (i = w.lo; i <= w.hi; i++) {
+        var cx = lay.laneX(i);
+        _c3.copy(laneCol(i, 'glow')).lerp(K_WHITE, 0.45).multiplyScalar(1.8);
+        if (dir === 0) {
+          lwArrowFwd.push(cx - sx, cx + sx, zN, zF, ay, _c3.r, _c3.g, _c3.b, a, a);
+        } else {
+          /* x0 > x1 espelha a textura: a seta aponta para a esquerda */
+          lwArrowSide.push(cx - sx * dir, cx + sx * dir, zN, zF, ay, _c3.r, _c3.g, _c3.b, a, a);
+        }
+      }
+    }
+
+    lwShade.end();
+    lwArrowSide.end();
+    lwArrowFwd.end();
   }
 
   /* ---- trilhos, neon, LED ---- */
@@ -2016,6 +2186,7 @@
     safe('buildDividers', buildDividers);
     safe('buildRails', buildRails);
     safe('buildDecals', buildDecals);
+    safe('buildLaneWindow', buildLaneWindow);
     safe('buildStrike', buildStrike);
     safe('buildFrets', buildFrets);
     safe('buildStarPower', buildStarPower);
@@ -2078,6 +2249,7 @@
     safe('input', readInput);
     safe('lanes', function () { updateLanes(dt); });
     safe('beatLines', function () { updateBeatLines(songTime); });
+    safe('laneWindows', function () { updateLaneWindows(dt, songTime); });
     safe('frets', function () { updateFrets(dt, songTime); });
     safe('rails', function () { updateRails(dt); });
     safe('strike', function () { updateStrike(dt); });
@@ -2156,6 +2328,10 @@
   function reset() {
     chartCursor = 0;
     chartSig = '';
+    lwList = null;
+    lwCur = -1;
+    lwArrowK = -1;
+    lwArrowA = 0;
     for (var pi = 0; pi < PULSE_MAX; pi++) { pulses[pi].active = false; pulses[pi].t = 0; }
     pulseLevel = pulseTarget = 0;
     spOn = false;
@@ -2183,6 +2359,7 @@
     beatPool.length = 0; barPool.length = 0; rails.length = 0;
     frets.length = 0; spEdge.length = 0; neonRefl.length = 0;
     deck = null; deckMat = null; strike = null; decals = null;
+    lwShade = null; lwArrowSide = null; lwArrowFwd = null; lwList = null;
     spWash = null; spWashMat = null; farFade = null; farFadeMat = null;
     rivets = null; inlayL = null; inlayR = null;
     group = null;
@@ -2207,6 +2384,8 @@
       starPower: spLevel,
       pulseLevel: pulseLevel,
       lanes: laneHold.slice(),
+      laneWindow: (lwList && lwCur >= 0) ? { index: lwCur, lo: lwList[lwCur].lo, hi: lwList[lwCur].hi,
+                                             arrows: lwArrowK, arrowA: lwArrowA, act: laneAct.slice() } : null,
       theme: themeName,
       scroll: scrollDist
     };
