@@ -41,6 +41,9 @@
   // para que `GH.Audio.buses.guitar` nunca estoure mesmo antes do init.
   var buses = { music: null, guitar: null, drums: null, sfx: null, crowd: null };
   var busSends = {};         // { nome: { reverb: GainNode, delay: GainNode } }
+  // Entrada de efeito das VOZES de cada barramento (ver sendFrom): segue o
+  // fader do barramento, para volume 0 calar tambem o reverb da voz.
+  var voiceSends = {};       // { nome: { reverb: GainNode, delay: GainNode } }
 
   // Nos de efeito expostos para o agente de musica (GH.Synth) plugar direto.
   var fx = {
@@ -747,6 +750,13 @@
       g.connect(sr); sr.connect(fx.reverbIn);
       g.connect(sd); sd.connect(fx.delayIn);
       busSends[nm] = { reverb: sr, delay: sd };
+
+      // Envios pontuais das vozes (sendFrom) saem ANTES do fader do
+      // barramento; sem este estagio, plateia no volume 0 continuava soando
+      // pelo reverb. Ele anda junto com o fader (setVolume).
+      var vr = ctx.createGain(); vr.gain.value = volume[nm]; vr.connect(fx.reverbIn);
+      var vd = ctx.createGain(); vd.gain.value = volume[nm]; vd.connect(fx.delayIn);
+      voiceSends[nm] = { reverb: vr, delay: vd };
     }
 
     graphOk = true;
@@ -933,13 +943,18 @@
   // Destino padrao de um efeito: barramento sfx.
   function sfxOut() { return buses.sfx || masterGain; }
 
-  // Envio pontual pra reverb/delay a partir de um no qualquer.
-  function sendFrom(node, target, amount) {
+  // Envio pontual pra reverb/delay a partir de um no qualquer. `bus` e o
+  // barramento em que a voz toca: o envio passa pelo fader dele, entao
+  // volume 0 cala o som E o eco. Sem `bus`, vai direto para o efeito.
+  function sendFrom(node, target, amount, bus) {
     if (!ctx || !node || amount <= 0) return null;
+    var which = (target === 'delay') ? 'delay' : 'reverb';
+    var dest = (bus && voiceSends[bus]) ? voiceSends[bus][which]
+             : (which === 'delay' ? fx.delayIn : fx.reverbIn);
     var g = ctx.createGain();
     g.gain.value = amount;
     node.connect(g);
-    g.connect(target === 'delay' ? fx.delayIn : fx.reverbIn);
+    g.connect(dest);
     return g;
   }
 
@@ -1047,8 +1062,8 @@
 
     src.connect(body); body.connect(tone); tone.connect(g);
     g.connect(pan.input); pan.output.connect(sfxOut());
-    var sR = sendFrom(g, 'reverb', perfect ? 0.32 : 0.20);
-    var sD = sendFrom(g, 'delay', 0.18);
+    var sR = sendFrom(g, 'reverb', perfect ? 0.32 : 0.20, 'sfx');
+    var sD = sendFrom(g, 'delay', 0.18, 'sfx');
 
     src.start(t);
     src.stop(t + 0.7);
@@ -1094,7 +1109,7 @@
     src.connect(bp); bp.connect(shaper); shaper.connect(g);
     thud.connect(thLP); thLP.connect(thG); thG.connect(sfxOut());
     g.connect(sfxOut());
-    var sR = sendFrom(g, 'reverb', 0.05);
+    var sR = sendFrom(g, 'reverb', 0.05, 'sfx');
 
     src.start(t, Math.random() * 1.2);
     src.stop(t + dur + 0.05);
@@ -1105,40 +1120,60 @@
     releaseAt(nodes, t + dur + 0.1);
   }
 
-  // Nota aberta: acorde grave e cheio, com corpo de sub e ataque de palheta.
+  // Nota aberta (o bastao): uma PALHETADA de verdade. As cinco cordas das
+  // raias soam de verde a laranja, 14 ms uma da outra, e juntas fecham o mi
+  // maior 6 da afinacao das raias, por cima da corda solta grave. Limpo e
+  // afinado de proposito: a versao anterior (corda grave com drive e um sub
+  // que CAIA de tom) soava como erro justo no acerto mais vistoso da pista.
+  var OPEN_STRUM_GAP = 0.014;
   function sfxOpenHit() {
     if (!ctx || !graphOk || !takeVoice()) return;
     var t = now();
+    var nodes = [];
 
-    var src = ctx.createBufferSource();
-    src.buffer = pluckOpen || pluckBuf[0];
-    src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.008;
+    // soma das cordas: os envios saem daqui, uma vez so
+    var mix = ctx.createGain();
+    mix.connect(sfxOut());
+    nodes.push(mix);
 
-    var drive = ctx.createWaveShaper();
-    drive.curve = shaperCurve(0.30);
-    drive.oversample = '2x';
+    for (var i = 0; i < 5; i++) {
+      if (!pluckBuf[i]) continue;
+      var t0 = t + i * OPEN_STRUM_GAP;
+      var src = ctx.createBufferSource();
+      src.buffer = pluckBuf[i];
+      src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.008;
+      var tone = filt('lowpass', 6400, 0.7);
+      // a palheta perde um pouco de forca atravessando as cordas
+      var pk = 0.40 - i * 0.022;
+      var g = ctx.createGain();
+      g.gain.value = 0;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(pk, t0 + 0.002);
+      g.gain.exponentialRampToValueAtTime(pk * 0.38, t0 + 0.08);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.58);
+      zeroAt(g.gain, t0 + 0.58);
+      var pan = makePanner(lanePan(i) * 0.7);
+      src.connect(tone); tone.connect(g); g.connect(pan.input); pan.output.connect(mix);
+      src.start(t0);
+      src.stop(t0 + 0.62);
+      nodes.push(src, tone, g, pan.input, pan.output);
+    }
 
-    var tone = filt('lowpass', 3200, 0.9);
-    var g = ctx.createGain();
-    perc(g.gain, t, 0.50, 0.003, 0.85);
+    // corda solta grave (E2), limpa: da o "peso" do bastao sem sujeira
+    var low = ctx.createBufferSource();
+    low.buffer = pluckOpen || pluckBuf[0];
+    var lowTone = filt('lowpass', 2400, 0.7);
+    var lowG = ctx.createGain();
+    perc(lowG.gain, t, 0.42, 0.003, 0.80);
+    low.connect(lowTone); lowTone.connect(lowG); lowG.connect(mix);
+    low.start(t); low.stop(t + 1.0);
+    nodes.push(low, lowTone, lowG);
 
-    // Sub sintetico reforcando a fundamental (o alto-falante pequeno agradece).
-    var sub = osc('sine', 82.41, t);
-    sub.frequency.exponentialRampToValueAtTime(78, t + 0.5);
-    var subG = ctx.createGain();
-    perc(subG.gain, t, 0.26, 0.004, 0.45);
-
-    src.connect(drive); drive.connect(tone); tone.connect(g); g.connect(sfxOut());
-    sub.connect(subG); subG.connect(sfxOut());
-    var sR = sendFrom(g, 'reverb', 0.20);
-    var sD = sendFrom(g, 'delay', 0.12);
-
-    src.start(t); src.stop(t + 1.2);
-    sub.start(t); sub.stop(t + 0.6);
-    var nodes = [src, drive, tone, g, sub, subG];
+    var sR = sendFrom(mix, 'reverb', 0.26, 'sfx');
+    var sD = sendFrom(mix, 'delay', 0.10, 'sfx');
     if (sR) nodes.push(sR);
     if (sD) nodes.push(sD);
-    releaseAt(nodes, t + 1.25);
+    releaseAt(nodes, t + 1.1);
   }
 
   // Star Power ligado: varredura ascendente + cintilancia harmonica + sub drop.
@@ -1176,8 +1211,8 @@
     var shimG = ctx.createGain();
     shimG.gain.value = 0.10;
     shimG.connect(out);
-    var sR = sendFrom(shimG, 'reverb', 0.85);
-    var sD = sendFrom(shimG, 'delay', 0.35);
+    var sR = sendFrom(shimG, 'reverb', 0.85, 'sfx');
+    var sD = sendFrom(shimG, 'delay', 0.35, 'sfx');
     var base = 659.25;
     var mult = [1, 1.5, 2, 3, 4, 5.04, 6];
     for (var i = 0; i < mult.length; i++) {
@@ -1256,7 +1291,7 @@
     var bg = ctx.createGain();
     perc(bg.gain, t, 0.16, 0.005, 0.55);
     bell.connect(bg); bg.connect(out);
-    var sR = sendFrom(bg, 'reverb', 0.5);
+    var sR = sendFrom(bg, 'reverb', 0.5, 'sfx');
     bell.start(t); bell.stop(t + 0.7);
 
     var nodes = [lp, g, o, bell, bg];
@@ -1275,8 +1310,8 @@
     var g = ctx.createGain();
     g.gain.value = 0.24;
     g.connect(out);
-    var sR = sendFrom(g, 'reverb', 0.30);
-    var sD = sendFrom(g, 'delay', 0.22);
+    var sR = sendFrom(g, 'reverb', 0.30, 'sfx');
+    var sD = sendFrom(g, 'delay', 0.22, 'sfx');
     var nodes = [g];
     if (sR) nodes.push(sR);
     if (sD) nodes.push(sD);
@@ -1319,7 +1354,7 @@
     drive.curve = shaperCurve(0.42);
     drive.oversample = '2x';
     lp.connect(drive); drive.connect(g); g.connect(out);
-    var sR = sendFrom(g, 'reverb', 0.55);
+    var sR = sendFrom(g, 'reverb', 0.55, 'sfx');
 
     var nodes = [lp, g, drive];
     if (sR) nodes.push(sR);
@@ -1343,7 +1378,7 @@
       var ng = ctx.createGain();
       perc(ng.gain, t, 0.16 * bands[b][1], 0.004, bands[b][2]);
       ns.connect(bp); bp.connect(ng); ng.connect(out);
-      var nR = sendFrom(ng, 'reverb', 0.4);
+      var nR = sendFrom(ng, 'reverb', 0.4, 'sfx');
       ns.start(t, Math.random());
       ns.stop(t + 1.0);
       nodes.push(ns, bp, ng);
@@ -1367,7 +1402,7 @@
     var hp = filt('highpass', 220, 0.7);
     o.connect(g); o2.connect(g2);
     g.connect(hp); g2.connect(hp); hp.connect(sfxOut());
-    var sR = sendFrom(hp, 'reverb', 0.16);
+    var sR = sendFrom(hp, 'reverb', 0.16, 'sfx');
     o.start(t); o.stop(t + dur + 0.05);
     o2.start(t); o2.stop(t + dur + 0.05);
     var nodes = [o, o2, g, g2, hp];
@@ -1425,7 +1460,7 @@
     main.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     zeroAt(main.gain, t + dur);
     main.connect(out);
-    var sR = sendFrom(main, 'reverb', 0.45);
+    var sR = sendFrom(main, 'reverb', 0.45, 'crowd');
 
     var breath = ctx.createGain();
     breath.gain.value = 1;
@@ -1500,7 +1535,7 @@
         var g = ctx.createGain();
         g.gain.setValueAtTime(0.0001, t);
         g.connect(out);
-        var sR = sendFrom(g, 'reverb', 0.5);
+        var sR = sendFrom(g, 'reverb', 0.5, 'crowd');
 
         /* Mesmo conserto do crowdCheer, e aqui ele importa mais: este leito
          * fica ligado do countdown ao fim da musica. As duas LFOs somavam
@@ -1691,6 +1726,10 @@
     if (!Object.prototype.hasOwnProperty.call(volume, bus)) return;
     volume[bus] = val;
     if (buses[bus]) rampGain(buses[bus].gain, val);
+    if (voiceSends[bus]) {
+      rampGain(voiceSends[bus].reverb.gain, val);
+      rampGain(voiceSends[bus].delay.gain, val);
+    }
   }
 
   function getVolume(bus) {
@@ -1845,7 +1884,7 @@
 
     // Ferramentas para o agente de musica (GH.Synth)
     now: now,
-    send: function (node, target, amount) { try { return sendFrom(node, target, amount); } catch (e) { return null; } },
+    send: function (node, target, amount, bus) { try { return sendFrom(node, target, amount, bus); } catch (e) { return null; } },
     noiseBuffer: noiseBuffer,
     pluckBuffer: pluckBuffer,
     makePanner: function (pan) { try { return ctx ? makePanner(pan) : null; } catch (e) { return null; } },
