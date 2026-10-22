@@ -803,7 +803,7 @@
     if (irs[currentIR]) fx.reverbConv.buffer = irs[currentIR];
 
     fx.reverbReturn = ctx.createGain();
-    fx.reverbReturn.gain.value = 1.0;   // o nivel util e definido pelos envios
+    fx.reverbReturn.gain.value = echoOn ? ECHO_RET.reverb : 0;   // o nivel util e definido pelos envios
 
     fx.reverbIn.connect(fx.reverbHP);
     fx.reverbHP.connect(lp);
@@ -844,7 +844,7 @@
     fx.delayPanR = makePanner(0.92);
 
     fx.delayReturn = ctx.createGain();
-    fx.delayReturn.gain.value = 0.9;
+    fx.delayReturn.gain.value = echoOn ? ECHO_RET.delay : 0;
 
     fx.delayIn.connect(fx.delayL);
     fx.delayL.connect(fx.delayR);
@@ -1124,10 +1124,7 @@
     g.gain.setValueAtTime(0.0001, t);
     g.connect(sfxOut());
     if (kind === 'perfect') {
-      var m = (midi > 0) ? midi : 76;
-      while (m < 84) m += 12;
-      while (m > 96) m -= 12;
-      var f = 440 * Math.pow(2, (m - 69) / 12);
+      var f = 440 * Math.pow(2, (plimMidi(midi) - 69) / 12);
       var a = osc('sine', f, t);
       var b = osc('sine', f * 2.01, t);          /* parcial de sino, um tico fora */
       var gb = ctx.createGain(); gb.gain.value = 0.35;
@@ -1149,6 +1146,52 @@
       g.gain.exponentialRampToValueAtTime(0.0001, end);
       o.start(t); o.stop(end + 0.02);
       nodes.push(o, lp);
+    }
+    zeroAt(g.gain, end);
+    releaseAt(nodes, end + 0.1);
+  }
+
+  /* Altura do "plim" para uma nota da melodia: TODAS sobem o mesmo tanto
+     (duas oitavas), para o desenho da melodia continuar o da musica. Dobrar
+     cada nota para dentro de uma faixa fixa embaralhava tudo: um Si -> Do
+     de meio tom virava um salto de quase uma oitava para BAIXO. O bastao e
+     a nota grave da base e sobe tres oitavas. */
+  function plimMidi(m) {
+    if (!(m > 0)) return 88;
+    return m + (m < 52 ? 36 : 24);
+  }
+
+  /* NOTA DA MUSICA — o acerto toca a(s) propria(s) nota(s) da melodia (o
+     acorde inteiro, se for acorde) no MESMO "plim" agudo da dica de tempo:
+     sino de seno, duas oitavas acima.
+     Por ora a nota soa sempre RETA, para o jogador conferir a afinacao; o
+     jeito de chegar nela (de baixo = adiantou, de cima = atrasou) volta
+     quando ele aprovar — e so trocar NOTE_GLIDE para 5. */
+  var NOTE_GLIDE = 0;
+  function sfxNoteCue(kind, midis) {
+    if (!ctx || !graphOk || !takeVoice()) return;
+    var t = now();
+    var list = (midis && midis.length) ? midis.slice(0, 3) : [76];
+    var glide = (kind === 'early') ? -NOTE_GLIDE : (kind === 'late' ? NOTE_GLIDE : 0);
+    var g = ctx.createGain(), nodes = [g], i;
+    var end = t + 0.38;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.18 / Math.sqrt(list.length), t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, end);
+    g.connect(sfxOut());
+    for (i = 0; i < list.length; i++) {
+      var f = 440 * Math.pow(2, (plimMidi(list[i]) - 69) / 12);
+      var from = f * Math.pow(2, glide / 12);
+      var a = osc('sine', from, t);
+      var b = osc('sine', from * 2.01, t);        /* parcial de sino, um tico fora */
+      if (glide) {
+        a.frequency.exponentialRampToValueAtTime(f, t + 0.09);
+        b.frequency.exponentialRampToValueAtTime(f * 2.01, t + 0.09);
+      }
+      var gb = ctx.createGain(); gb.gain.value = 0.35;
+      a.connect(g); b.connect(gb); gb.connect(g);
+      a.start(t); b.start(t); a.stop(end + 0.02); b.stop(end + 0.02);
+      nodes.push(a, b, gb);
     }
     zeroAt(g.gain, end);
     releaseAt(nodes, end + 0.1);
@@ -1767,7 +1810,20 @@
         if (Object.prototype.hasOwnProperty.call(s.volumes, k)) setVolume(k, s.volumes[k]);
       }
       if (s.reverbIR) setReverbIR(s.reverbIR);
+      setEcho(s.echo !== false);
     } catch (e) { /* configuracao invalida nao pode derrubar o audio */ }
+  }
+
+  /* ECO EM TEMPO REAL liga/desliga (Opcoes > Audio). Zera os dois RETORNOS
+     globais — reverb e delay — por onde passam os envios de todos os
+     barramentos (guitarra, base, efeitos, plateia). O eco que ja vem gravado
+     nos MP3 das musicas fica como esta. */
+  var ECHO_RET = { reverb: 1.0, delay: 0.9 };
+  var echoOn = true;
+  function setEcho(on) {
+    echoOn = on !== false;
+    if (fx.reverbReturn) rampGain(fx.reverbReturn.gain, echoOn ? ECHO_RET.reverb : 0);
+    if (fx.delayReturn) rampGain(fx.delayReturn.gain, echoOn ? ECHO_RET.delay : 0);
   }
 
   /* Troca a cauda de uma automacao sem criar um degrau. A leitura no fallback
@@ -1937,6 +1993,7 @@
     miss: function () { try { sfxMiss(); } catch (e) {} },
     openHit: function (midi) { try { sfxOpenHit(midi); } catch (e) {} },
     judge: function (kind, midi) { try { sfxJudge(kind, midi); } catch (e) {} },
+    noteCue: function (kind, midis) { try { sfxNoteCue(kind, midis); } catch (e) {} },
     starPowerOn: function () { try { sfxStarPowerOn(); } catch (e) {} },
     starPowerOff: function () { try { sfxStarPowerOff(); } catch (e) {} },
     streakUp: function (n) { try { sfxStreakUp(n); } catch (e) {} },
@@ -1954,6 +2011,15 @@
     getVolume: getVolume,
     setSend: function (bus, which, amount) { try { setSend(bus, which, amount); } catch (e) {} },
     setReverbIR: function (n) { try { setReverbIR(n); } catch (e) {} },
+    setEcho: function (on) { try { setEcho(on); } catch (e) {} },
+    /* para o F3: o que foi pedido e o ganho que de fato vale nos retornos */
+    echoState: function () {
+      return {
+        on: echoOn,
+        reverb: fx.reverbReturn ? fx.reverbReturn.gain.value : -1,
+        delay: fx.delayReturn ? fx.delayReturn.gain.value : -1
+      };
+    },
     setReverbMix: function (v) { try { setReverbMix(v); } catch (e) {} },
     setDelayMix: function (v) { try { setDelayMix(v); } catch (e) {} },
     setDelayTime: function (v) { try { setDelayTime(v); } catch (e) {} },

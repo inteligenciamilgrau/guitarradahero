@@ -731,16 +731,28 @@
     if (perfect) mcall('Engine', 'bloomPulse', 0.055 + 0.02 * Math.min(4, mult), 5.0);
     if (e.chord) mcall('Engine', 'kick', 0.030 + 0.006 * e.chordSize);
 
-    /* --- som --- (a corda do acerto pode ser desligada nas Opcoes: sobra a
-       dica de tempo, que fica bem mais facil de ouvir) */
-    if (!(GH.Settings && GH.Settings.strumSfx === false)) {
-      if (e.open) sfx('openHit', noteMidi(e.noteIdx));
-      else sfx('hit', lanes.length ? lanes[0] : 0, e.quality, noteMidi(e.noteIdx));
-    }
-    /* dica de tempo: plim = perfeito, bip subindo = adiantou, bup descendo =
-       atrasou. O bot do modo demo/captura nao precisa de aula. */
-    if (e.source !== 'auto' && !(GH.Settings && GH.Settings.timingCues === false)) {
-      sfx('judge', perfect ? 'perfect' : (e.deltaMs < 0 ? 'early' : 'late'), noteMidi(e.noteIdx));
+    /* --- som --- "Som do acerto" (Opcoes > Audio):
+         palhetada -> a corda pincada de sempre;
+         dica      -> plim = perfeito, bip subindo = adiantou, bup descendo = atrasou;
+         nota      -> a nota da melodia (o acorde, se for acorde) num sino; ela
+                      chega de baixo se adiantou e de cima se atrasou.
+       O bot do modo demo/captura toca a palhetada: nao precisa de aula. */
+    var fb = (GH.Settings && GH.Settings.hitFeedback) || 'nota';
+    if (e.source === 'auto') fb = 'palhetada';
+    var timing = perfect ? 'perfect' : (e.deltaMs < 0 ? 'early' : 'late');
+    if (fb === 'dica') {
+      sfx('judge', timing, noteMidi(e.noteIdx));
+    } else if (fb === 'nota') {
+      var mids = [], ids = (e.noteIdxs && e.noteIdxs.length) ? e.noteIdxs : [e.noteIdx];
+      for (i = 0; i < ids.length; i++) {
+        var nm = noteMidi(ids[i]);
+        if (nm > 0 && mids.indexOf(nm) < 0) mids.push(nm);
+      }
+      sfx('noteCue', timing, mids);
+    } else if (e.open) {
+      sfx('openHit', noteMidi(e.noteIdx));
+    } else {
+      sfx('hit', lanes.length ? lanes[0] : 0, e.quality, noteMidi(e.noteIdx));
     }
 
     /* --- guitarra volta a soar --- */

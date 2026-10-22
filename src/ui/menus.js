@@ -3898,17 +3898,23 @@
       set: function (v) { setSetting('reverbIR', v); call('Audio', 'setReverbIR', v); }
     });
     row(pgAud, {
-      label: 'Som da palhetada', kind: 'toggle',
-      get: function () { return setting('strumSfx', true) !== false; },
-      set: function (v) { setSetting('strumSfx', v); }
+      label: 'Eco (reverb e delay)', kind: 'toggle',
+      get: function () { return setting('echo', true) !== false; },
+      set: function (v) { setSetting('echo', v); call('Audio', 'setEcho', v); }
     });
+    /* um tipo so de som por acerto; trocar toca um exemplo daquele tipo */
     row(pgAud, {
-      label: 'Som de tempo no acerto', kind: 'toggle',
-      get: function () { return setting('timingCues', true) !== false; },
+      label: 'Som do acerto', kind: 'choice',
+      options: [{ v: 'palhetada', label: 'Palhetada' }, { v: 'dica', label: 'Dica de tempo' },
+                { v: 'nota', label: 'Nota da música' }],
+      get: function () { return setting('hitFeedback', 'nota'); },
       set: function (v) {
-        setSetting('timingCues', v);
-        /* liga: toca um "plim" de exemplo para o jogador saber o que esperar */
-        if (v && GH.Audio && GH.Audio.sfx && GH.Audio.sfx.judge) GH.Audio.sfx.judge('perfect', 76);
+        setSetting('hitFeedback', v);
+        var X = GH.Audio && GH.Audio.sfx;
+        if (!X) return;
+        if (v === 'palhetada' && X.hit) X.hit(2, 'perfect', 64);
+        else if (v === 'dica' && X.judge) X.judge('perfect', 76);
+        else if (v === 'nota' && X.noteCue) X.noteCue('perfect', [64]);
       }
     });
 
@@ -4115,10 +4121,12 @@
       'com o teste ligado, <b>Enter</b> é sempre batida. Aperte <b>Esc</b> para parar ' +
       '(a medida fica guardada) e depois <b>aplicar desvio medido</b>: ' +
       'o jogo compensa sozinho.');
-    note('audio', '<span class="t">Som de tempo</span>' +
-      'A cada acerto: <b>plim</b> = perfeito; <b>bip subindo</b> = você adiantou; ' +
-      '<b>bup descendo</b> = você atrasou. Segue o volume de Efeitos. Desligue o ' +
-      '<b>som da palhetada</b> para ouvir só as dicas.<br>' +
+    note('audio', '<span class="t">Som do acerto</span>' +
+      '<b>Palhetada</b>: a corda. <b>Dica de tempo</b>: plim = perfeito, bip subindo = adiantou, ' +
+      'bup descendo = atrasou. <b>Nota da música</b>: a própria nota da melodia (ou o acorde), ' +
+      'num plim agudo duas oitavas acima. Segue o volume de Efeitos.<br>' +
+      '<b>Eco</b> desligado tira o reverb e o delay que o jogo põe na hora; o que já vem ' +
+      'gravado na música fica.<br>' +
       '<b>Saída de áudio</b>: <b>Estável</b> (padrão) dá folga contra cortes; <b>Rápida</b> ' +
       'tem menos atraso, mas pode picotar. Vale após recarregar (F5).');
     note('video', '<span class="t">Qualidade</span>' +

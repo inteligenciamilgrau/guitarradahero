@@ -441,7 +441,10 @@
     /* ============================================================ CONTAGEM */
     /* 30% e nao 44%: no meio da tela o 3-2-1 ficava em cima das primeiras
        notas, que ja vem descendo durante a contagem; aqui ele fica no palco */
-    '#gh-hud .ghh-count{position:absolute;left:50%;top:30%;transform:translate(-50%,-50%);',
+    /* do lado DIREITO, no vao entre o braco da guitarra (que vai ate ~60% da
+       largura no meio da tela) e o medidor de Star Power: no centro ela
+       cobria as primeiras notas */
+    '#gh-hud .ghh-count{position:absolute;left:78%;top:40%;transform:translate(-50%,-50%);',
     'text-align:center;opacity:0;will-change:opacity}',
     '#gh-hud .ghh-count-n{font-family:var(--ghh-display);font-weight:900;line-height:.88;',
     'font-size:clamp(60px,21vmin,280px);letter-spacing:-.04em;transform-origin:50% 50%;',
@@ -2527,6 +2530,11 @@
                   (bn && bn.gain ? ' (ganho ' + nDec(bn.gain.value, 2) + ')' : ''));
         }
         line('volumes', vb.join(', '));
+      }
+      if (Au && typeof Au.echoState === 'function') {
+        var es = Au.echoState();
+        line('eco em tempo real', (es.on ? 'ligado' : 'DESLIGADO') + ' (retorno reverb ' + nDec(es.reverb, 2) +
+             ', delay ' + nDec(es.delay, 2) + ')');
       }
     } catch (eAu) { /* ok */ }
     if (s) {

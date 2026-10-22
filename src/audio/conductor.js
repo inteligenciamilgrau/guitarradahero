@@ -51,11 +51,12 @@
     scrollSpeed: 14,        // unidades/segundo — alimenta GH.Chart.speed
     difficulty: 'medio',    // dificuldade preferida do jogador
     reverbIR: 'clube',      // 'clube' | 'arena'
+    echo: true,             // reverb + delay em tempo real (o gravado nos MP3 fica)
     lefty: false,           // inverte a ordem das raias
     showFPS: false,
     hitFlash: true,         // flash de tela no acerto (pode incomodar)
-    timingCues: true,       // som de perfeito / adiantado / atrasado no acerto
-    strumSfx: true,         // corda tocada a cada acerto (a "palhetada")
+    // som do acerto: 'palhetada' (corda), 'dica' (plim/bip/bup) ou 'nota' (a nota da musica)
+    hitFeedback: 'nota',
     crowdAmbience: true,    // leito de plateia continuo nos menus
     crowd3D: true,          // publico instanciado e animado ao fundo do palco
     calibrated: false,      // o jogador ja passou pela calibracao?
@@ -67,12 +68,21 @@
        Agora sao chaves de primeira classe: entram no sanitize, no save e no
        reset como qualquer outra. */
     noFail: false,          // pratica: o rock meter nunca mata
-    invertStrum: false      // inverte cima/baixo da palhetada
+    invertStrum: false,     // inverte cima/baixo da palhetada
+
+    /* ULTIMA ESCOLHA. Menus e Game ja gravavam estas chaves, mas o sanitize
+       abaixo so aceitava as que conhecia e o save nao as levava: a cada F5 o
+       jogo esquecia a musica e a dificuldade e caia numa qualquer. */
+    lastSongId: '',         // ultima musica escolhida/jogada
+    lastDifficulty: '',     // ultima dificuldade escolhida/jogada
+    lastResultsIndex: 0     // botao em foco na tela de resultados
   };
+  var SONG_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
   var VALID_QUALITY = { low: 1, med: 1, high: 1, ultra: 1 };
   var VALID_DIFF = { facil: 1, medio: 1, puxado: 1, dificil: 1, guitarrada: 1 };
   var VALID_IR = { clube: 1, arena: 1 };
+  var VALID_FEEDBACK = { palhetada: 1, dica: 1, nota: 1 };
 
   function clampNum(v, lo, hi, fallback) {
     var n = typeof v === 'number' ? v : parseFloat(v);
@@ -107,16 +117,19 @@
     if (typeof src.qualityChosen !== 'undefined') target.qualityChosen = !!src.qualityChosen;
     if (src.difficulty && VALID_DIFF[src.difficulty]) target.difficulty = src.difficulty;
     if (src.reverbIR && VALID_IR[src.reverbIR]) target.reverbIR = src.reverbIR;
+    if (typeof src.echo !== 'undefined') target.echo = !!src.echo;
     if (typeof src.lefty !== 'undefined') target.lefty = !!src.lefty;
     if (typeof src.showFPS !== 'undefined') target.showFPS = !!src.showFPS;
     if (typeof src.hitFlash !== 'undefined') target.hitFlash = !!src.hitFlash;
-    if (typeof src.timingCues !== 'undefined') target.timingCues = !!src.timingCues;
-    if (typeof src.strumSfx !== 'undefined') target.strumSfx = !!src.strumSfx;
+    if (typeof src.hitFeedback === 'string' && VALID_FEEDBACK[src.hitFeedback]) target.hitFeedback = src.hitFeedback;
     if (typeof src.crowdAmbience !== 'undefined') target.crowdAmbience = !!src.crowdAmbience;
     if (typeof src.crowd3D !== 'undefined') target.crowd3D = !!src.crowd3D;
     if (typeof src.calibrated !== 'undefined') target.calibrated = !!src.calibrated;
     if (typeof src.noFail !== 'undefined') target.noFail = !!src.noFail;
     if (typeof src.invertStrum !== 'undefined') target.invertStrum = !!src.invertStrum;
+    if (typeof src.lastSongId === 'string' && (src.lastSongId === '' || SONG_ID_RE.test(src.lastSongId))) target.lastSongId = src.lastSongId;
+    if (typeof src.lastDifficulty === 'string' && (src.lastDifficulty === '' || VALID_DIFF[src.lastDifficulty])) target.lastDifficulty = src.lastDifficulty;
+    if (typeof src.lastResultsIndex !== 'undefined') target.lastResultsIndex = Math.round(clampNum(src.lastResultsIndex, 0, 3, 0));
     if (src.volumes && typeof src.volumes === 'object') {
       for (var k in DEFAULTS.volumes) {
         if (!Object.prototype.hasOwnProperty.call(DEFAULTS.volumes, k)) continue;
@@ -171,16 +184,19 @@
       scrollSpeed: GH.Settings.scrollSpeed,
       difficulty: GH.Settings.difficulty,
       reverbIR: GH.Settings.reverbIR,
+      echo: GH.Settings.echo,
       lefty: GH.Settings.lefty,
       showFPS: GH.Settings.showFPS,
       hitFlash: GH.Settings.hitFlash,
-      timingCues: GH.Settings.timingCues,
-      strumSfx: GH.Settings.strumSfx,
+      hitFeedback: GH.Settings.hitFeedback,
       crowdAmbience: GH.Settings.crowdAmbience,
       crowd3D: GH.Settings.crowd3D,
       calibrated: GH.Settings.calibrated,
       noFail: GH.Settings.noFail,
-      invertStrum: GH.Settings.invertStrum
+      invertStrum: GH.Settings.invertStrum,
+      lastSongId: GH.Settings.lastSongId,
+      lastDifficulty: GH.Settings.lastDifficulty,
+      lastResultsIndex: GH.Settings.lastResultsIndex
     };
     var str;
     try { str = JSON.stringify(payload); } catch (e) { return false; }
@@ -198,6 +214,7 @@
         }
       }
       if (GH.Audio && GH.Audio.setReverbIR) GH.Audio.setReverbIR(S.reverbIR);
+      if (GH.Audio && GH.Audio.setEcho) GH.Audio.setEcho(S.echo !== false);
     } catch (e) {}
     try { if (GH.Chart) GH.Chart.speed = S.scrollSpeed; } catch (e2) {}
     try { if (GH.Engine && GH.Engine.setQuality) GH.Engine.setQuality(S.quality); } catch (e3) {}
@@ -232,10 +249,14 @@
     return S[path];
   }
 
+  /* "Restaurar tudo" nao tira o jogador da musica em que ele estava */
+  var KEEP_ON_RESET = { lastSongId: 1, lastDifficulty: 1, lastResultsIndex: 1 };
+
   function settingsReset() {
     var fresh = cloneDefaults(), k;
     for (k in fresh) {
       if (!Object.prototype.hasOwnProperty.call(fresh, k)) continue;
+      if (KEEP_ON_RESET[k]) continue;
       /* volumes e copiado NO LUGAR: quem guardou a referencia (mixer do audio,
          sliders do menu) continua olhando para o mesmo objeto. */
       if (k === 'volumes') {
