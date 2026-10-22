@@ -215,6 +215,7 @@
       inputContext: 'menu', intensity: 0.42, showWorld: true,
       enter: function () {
         teardownSong(false);
+        /* plateia de fundo sempre; quem cala e o volume da plateia */
         mcall('Audio', 'ambience', true, 0.5);
         mcall('FX', 'crowdReaction', 'idle');
       }

@@ -2511,6 +2511,19 @@
         line('música', sd.mode === 'stems' ? 'stems pré-gravadas'
              : (sd.mode === 'live' ? 'SINTETIZADA AO VIVO (pesada) — ' + (sd.lastError || sd.state)
              : sd.mode + ' / ' + sd.state) + ' · ' + (sd.song || '—'));
+        line('arquivos de música', 'carregados ' + nInt(sd.loads) + ', falhas ' + nInt(sd.loadFailures) +
+             ', fontes tocando ' + nInt(sd.sources) + (sd.lastError ? ', erro: ' + sd.lastError : ''));
+      }
+      /* volume escolhido x ganho real do barramento: "sem musica" aparece aqui */
+      if (Au && Au.buses && typeof Au.getVolume === 'function') {
+        var VB = [['master', 'geral'], ['music', 'música'], ['guitar', 'guitarra'], ['drums', 'bateria'],
+                  ['sfx', 'efeitos'], ['crowd', 'plateia']], vb = [];
+        for (var vi = 0; vi < VB.length; vi++) {
+          var bk = VB[vi][0], bn = Au.buses[bk];
+          vb.push(VB[vi][1] + ' ' + nInt(Au.getVolume(bk) * 100) + '%' +
+                  (bn && bn.gain ? ' (ganho ' + nDec(bn.gain.value, 2) + ')' : ''));
+        }
+        line('volumes', vb.join(', '));
       }
     } catch (eAu) { /* ok */ }
     if (s) {

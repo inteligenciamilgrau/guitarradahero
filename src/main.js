@@ -467,16 +467,15 @@
     '#gh-load .notice{position:absolute;left:0;right:0;bottom:22px;text-align:center;',
     'font-size:clamp(9px,.92vw,12px);line-height:1.65;color:#5a6485;letter-spacing:.045em;',
     'padding:0 8vw;font-weight:500}',
-    /* O convite para ligar o som ficava a 26px do fundo, EM CIMA do aviso
-       didatico da tela de titulo — e agora ele pode ficar na tela muito mais
-       tempo (so sai quando o AudioContext confirma que esta rodando). 14,5vh
-       o coloca acima do selo do estudio (que vive a 6u = no maximo 10,7vh) e
-       bem longe do aviso obrigatorio, em qualquer proporcao de janela. */
-    '#gh-hint{position:absolute;left:50%;bottom:15.5vh;transform:translateX(-50%);z-index:880;',
-    'font:600 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.2em;text-transform:uppercase;',
-    'color:#95a0c0;background:rgba(8,10,18,.62);border:1px solid rgba(255,255,255,.09);',
-    'padding:9px 18px;border-radius:99px;pointer-events:none;white-space:nowrap;',
-    'opacity:0;transition:opacity .5s ease;backdrop-filter:blur(6px)}',
+    /* O convite para ligar o som e so um registro: letra miuda no canto
+       superior direito, logo abaixo do selo "Projeto didatico" do titulo
+       (mesma margem direita: 2,2u, com u = min(1vw, 1,7778vh) como no menu).
+       Sai sozinho no primeiro clique ou tecla. */
+    '#gh-hint{position:absolute;right:calc(min(1vw,1.7778vh)*2.4);top:calc(min(1vw,1.7778vh)*4.6);',
+    'z-index:880;font-family:"Segoe UI",system-ui,sans-serif;font-weight:600;line-height:1;',
+    'font-size:max(7px,calc(min(1vw,1.7778vh)*.52));letter-spacing:.2em;text-transform:uppercase;',
+    'color:rgba(149,160,192,.6);text-shadow:0 1px 2px rgba(0,0,0,.9);',
+    'pointer-events:none;white-space:nowrap;opacity:0;transition:opacity .5s ease}',
     '#gh-hint.on{opacity:1}'
   ].join('');
 
@@ -665,11 +664,8 @@
     /* O contexto so acordou agora: e AQUI que o maestro precisa adotar o
        relogio de audio de verdade. */
     wireAudio(ctx);
-    try {
-      var amb = true;
-      if (GH.Settings && typeof GH.Settings.crowdAmbience === 'boolean') amb = GH.Settings.crowdAmbience;
-      opt('Audio', 'ambience', amb, 0.5);
-    } catch (e) { /* ambiencia e enfeite */ }
+    /* plateia de fundo: quem cala e o volume dela (Opcoes), nao uma chave */
+    try { opt('Audio', 'ambience', true, 0.5); } catch (e) { /* ambiencia e enfeite */ }
     hideAudioHint();
     detachUnlock();
     return true;
@@ -770,9 +766,19 @@
         ti++; doneUnits++;
         if (nowMs() - t0 > FRAME_BUDGET_MS) break;
       }
-      progress('gerando texturas · ' + ti + '/' + texNames.length);
+      progress('preparando texturas · ' + ti + '/' + texNames.length);
       if (ti < texNames.length) { requestAnimationFrame(sliceTextures); return; }
       requestAnimationFrame(sliceEnv);
+    }
+
+    /* Texturas ja guardadas de uma abertura anterior (GH.Materials, 4B) sao
+       lidas antes de fatiar: ai cada tex.get so decodifica em vez de desenhar.
+       Se o navegador demorar, segue sem esperar — gera como sempre. */
+    var texStarted = false;
+    function startTextures() {
+      if (texStarted) return;
+      texStarted = true;
+      requestAnimationFrame(sliceTextures);
     }
 
     function sliceEnv() {
@@ -817,7 +823,11 @@
       attachUnlock();
       showAudioHint();
 
-      /* um respiro para a barra chegar visivelmente a 100% */
+      /* guarda as texturas geradas agora para a proxima abertura — com o
+         titulo ja na tela, sem disputar o carregamento */
+      setTimeout(function () { opt('Materials', 'saveTextureCache'); }, 2500);
+
+      /* um respiro curto para a barra chegar visivelmente a 100% */
       setTimeout(function () {
         hideLoader();
         guard('titulo', function () { opt('Game', 'setState', 'title'); });
@@ -831,10 +841,15 @@
         };
         try { document.body.setAttribute('data-gh-diag', JSON.stringify(window.__GH_BOOT)); }
         catch (e) { /* diagnostico nao e critico */ }
-      }, 340);
+      }, 120);
     }
 
-    requestAnimationFrame(sliceTextures);
+    if (GH.Materials && typeof GH.Materials.prefetchTextures === 'function') {
+      try { GH.Materials.prefetchTextures(startTextures); } catch (e) { startTextures(); }
+      setTimeout(startTextures, 1500);
+    } else {
+      startTextures();
+    }
   }
 
   /* =========================================================================

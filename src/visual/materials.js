@@ -20,11 +20,12 @@
  *   5. Roughness e AO tambem procedurais e coerentes com o mesmo heightmap.
  *   6. Cache agressivo: uma textura nunca e gerada duas vezes. Geracao e
  *      preguicosa (getter) para nao custar boot em cena que nao usa a textura.
+ *      E entre aberturas do jogo: ver secao 4B (IndexedDB).
  *
  * Carrega depois de: three.min.js, src/core/util.js, src/core/palette.js.
  * Nao usa nenhum outro modulo no topo do IIFE — so em runtime e com guarda.
  * ========================================================================== */
-(function (GH) {
+(function materialsModule(GH) {
   'use strict';
 
   /* ==========================================================================
@@ -473,8 +474,119 @@
     t.magFilter = THREE.LinearFilter;
     t.anisotropy = opts.aniso != null ? opts.aniso : maxAniso;
     t.name = opts.name || '';
+    t.userData.ghOpts = opts;      /* o cache persistente remonta igual (4B) */
     t.needsUpdate = true;
     return registerTexture(t);
+  }
+
+  /* ==========================================================================
+   * 4B. CACHE PERSISTENTE DAS TEXTURAS (IndexedDB)
+   * Desenhar as ~46 texturas pixel a pixel custava ~1,2 s de CPU em TODA
+   * abertura do jogo — a maior fatia do carregamento. Elas saem sempre
+   * iguais, entao a primeira abertura guarda cada canvas pronto (WebP sem
+   * perda, ~6 MB) e as seguintes so decodificam (~60 ms, fora da thread
+   * principal). A chave e o hash do proprio codigo deste arquivo + a escala
+   * de textura: qualquer mudanca aqui invalida o cache sozinha.
+   * Sem IndexedDB (aba anonima restrita, file:// em outro navegador) tudo
+   * continua como antes: gera na hora.
+   * ======================================================================== */
+
+  var TEXDB = 'gh-texcache', TEXSTORE = 'tex';
+  var texPre = {};              // nome -> { bm: ImageBitmap, opts, key } lidos nesta abertura
+  var texMade = [];             // nomes gerados do zero nesta abertura (a guardar)
+  var texSrcHash = '';
+
+  function hashStr(s) {         // FNV-1a 32 bits
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return (h >>> 0).toString(36);
+  }
+  function texCacheKey() {
+    if (!texSrcHash) {
+      try { texSrcHash = hashStr(String(materialsModule)); } catch (e) { texSrcHash = 'x'; }
+    }
+    return texSrcHash + '@' + texScale;
+  }
+
+  function openTexDB(cb) {
+    var called = false;
+    function once(db) { if (!called) { called = true; cb(db); } }
+    try {
+      if (!window.indexedDB || typeof createImageBitmap !== 'function') return once(null);
+      var rq = window.indexedDB.open(TEXDB, 1);
+      rq.onupgradeneeded = function () { rq.result.createObjectStore(TEXSTORE); };
+      rq.onsuccess = function () { once(rq.result); };
+      rq.onerror = function () { once(null); };
+      rq.onblocked = function () { once(null); };
+    } catch (e) { once(null); }
+  }
+
+  /* Le o cache desta versao e ja decodifica as imagens. done() e chamado
+     exatamente uma vez, aconteca o que acontecer. */
+  function prefetchTextures(done) {
+    var ended = false;
+    function end() { if (ended) return; ended = true; try { if (done) done(); } catch (e) { /* ok */ } }
+    var key = texCacheKey();
+    openTexDB(function (db) {
+      if (!db) return end();
+      try {
+        var rq = db.transaction(TEXSTORE, 'readonly').objectStore(TEXSTORE).getAll();
+        rq.onsuccess = function () {
+          var rows = rq.result || [], jobs = [];
+          rows.forEach(function (r) {
+            if (!r || r.key !== key || !r.blob || !GENERATORS[r.name] || texCache[r.name]) return;
+            jobs.push(createImageBitmap(r.blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+              .then(function (bm) { texPre[r.name] = { bm: bm, opts: r.opts || {}, key: key }; }, function () { /* gera */ }));
+          });
+          Promise.all(jobs).then(end, end);
+        };
+        rq.onerror = end;
+      } catch (e) { end(); }
+    });
+  }
+
+  /* Textura vinda do cache, ou null (ai o gerador roda normalmente). */
+  function textureFromCache(name) {
+    var pre = texPre[name];
+    if (!pre) return null;
+    delete texPre[name];
+    var t = null;
+    if (pre.key === texCacheKey()) {
+      try {
+        var cv = makeCanvas(pre.bm.width, pre.bm.height);
+        ctx2d(cv).drawImage(pre.bm, 0, 0);
+        t = texFromCanvas(cv, pre.opts);
+      } catch (e) { t = null; }
+    }
+    try { pre.bm.close(); } catch (e2) { /* ok */ }
+    return t;
+  }
+
+  /* Guarda as texturas geradas do zero nesta abertura. O boot chama isto
+     depois que o titulo ja apareceu; com musica tocando, espera. A codificacao
+     (WebP sem perda) roda fora da thread principal e tudo vai numa escrita
+     so. A loja e indexada pelo nome: uma versao nova sobrescreve a velha. */
+  function saveTextureCache() {
+    if (!texMade.length) return;
+    var st = GH.Game && GH.Game.state;
+    if (st === 'playing' || st === 'countdown') { setTimeout(saveTextureCache, 3000); return; }
+    var key = texCacheKey(), names = texMade.splice(0);
+    Promise.all(names.map(function (n) {
+      var t = texCache[n], cv = t && t.image;
+      if (!cv || typeof cv.toBlob !== 'function') return null;
+      return new Promise(function (res) {
+        try { cv.toBlob(function (b) { res(b ? { name: n, key: key, blob: b, opts: t.userData.ghOpts || {} } : null); }, 'image/webp', 1); }
+        catch (e) { res(null); }
+      });
+    })).then(function (rows) {
+      openTexDB(function (db) {
+        if (!db) return;
+        try {
+          var os = db.transaction(TEXSTORE, 'readwrite').objectStore(TEXSTORE);
+          rows.forEach(function (r) { if (r) os.put(r, r.name); });
+        } catch (e) { /* cota cheia ou modo privado: fica sem cache */ }
+      });
+    });
   }
 
   /* Clone leve: compartilha o canvas, permite repeat/offset independentes. */
@@ -2312,12 +2424,15 @@
       if (window.console && console.warn) console.warn('[GH.Materials] textura desconhecida: ' + name);
       return fallbackTexture();
     }
+    t = textureFromCache(name);
+    if (t) { texCache[name] = t; return t; }
     try {
       t = gen();
     } catch (e) {
       if (window.console && console.warn) console.warn('[GH.Materials] falha ao gerar "' + name + '": ' + (e && e.message));
       t = null;
     }
+    if (t && t.image) texMade.push(name);
     if (!t) t = fallbackTexture();
     texCache[name] = t;
     return t;
@@ -3650,6 +3765,8 @@
     init: init,
     disposeAll: disposeAll,
     preload: preload,
+    prefetchTextures: prefetchTextures,     // cache entre aberturas (4B)
+    saveTextureCache: saveTextureCache,
     setTextureScale: setTextureScale,
     setQuality: setQuality,
     stats: stats,

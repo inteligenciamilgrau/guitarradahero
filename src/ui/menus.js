@@ -1426,8 +1426,6 @@
     'font-size:calc(var(--u)*2.0);letter-spacing:.035em;text-transform:uppercase;color:#b9c2dc;',
     'text-shadow:0 calc(var(--u)*.1) 0 rgba(0,0,0,.85),0 calc(var(--u)*.35) calc(var(--u)*.9) rgba(0,0,0,.7);',
     'transition:color .2s ease}',
-    '#gh-menus .t-item .sub{font-size:calc(var(--u)*.70);font-weight:700;letter-spacing:.24em;',
-    'text-transform:uppercase;color:transparent;transition:color .22s ease;white-space:nowrap}',
     /* losango marajoara como cursor */
     '#gh-menus .t-item::before{content:"";position:absolute;left:calc(var(--u)*.55);top:50%;',
     'width:calc(var(--u)*.62);height:calc(var(--u)*.62);margin-top:calc(var(--u)*-.31);',
@@ -1444,12 +1442,8 @@
     '#gh-menus .t-item.foc .lbl{color:#fff;',
     'text-shadow:0 calc(var(--u)*.1) 0 rgba(60,10,0,.9),0 0 calc(var(--u)*1.6) rgba(255,190,90,.85),',
     '0 calc(var(--u)*.4) calc(var(--u)*1.1) rgba(0,0,0,.8)}',
-    '#gh-menus .t-item.foc .sub{color:var(--gold)}',
-
     /* -------------------------- RODAPE ----------------------------- */
-    '#gh-menus .t-notice{position:absolute;left:0;right:0;bottom:calc(var(--u)*1.35);text-align:center;padding:0 6vw}',
-    '#gh-menus .t-hints{position:absolute;right:calc(var(--u)*2.2);bottom:calc(var(--u)*3.6)}',
-    '#gh-menus .t-stamp{position:absolute;left:calc(var(--u)*2.2);bottom:calc(var(--u)*3.6);',
+    '#gh-menus .t-notice{position:absolute;left:0;right:0;bottom:calc(var(--u)*1.35);text-align:center;padding:0 6vw}',    '#gh-menus .t-stamp{position:absolute;left:calc(var(--u)*2.2);bottom:calc(var(--u)*3.6);',
     'font-size:calc(var(--u)*.68);letter-spacing:.22em;text-transform:uppercase;font-weight:700;',
     'color:var(--ink-faint)}',
     '#gh-menus .t-stamp b{color:var(--cyan)}',
@@ -1481,10 +1475,10 @@
   ].join(''));
 
   var TITLE_ITEMS = [
-    { label: 'Jogar', sub: 'escolher música', action: 'songselect' },
-    { label: 'Tutorial', sub: 'aprenda a tocar', action: 'tutorial' },
-    { label: 'Opções', sub: 'calibrar e ajustar', action: 'settings' },
-    { label: 'Créditos', sub: 'homenagens', action: 'credits' }
+    { label: 'Jogar', action: 'songselect' },
+    { label: 'Tutorial', action: 'tutorial' },
+    { label: 'Opções', action: 'settings' },
+    { label: 'Créditos', action: 'credits' }
   ];
 
   function buildTitle() {
@@ -1513,8 +1507,7 @@
     for (i = 0; i < TITLE_ITEMS.length; i++) {
       var def = TITLE_ITEMS[i];
       var row = add(menu, mk('div', 't-item'));
-      row.innerHTML = '<span class="lbl">' + esc(def.label) + '</span>' +
-        '<span class="sub">' + esc(def.sub) + '</span>';
+      row.innerHTML = '<span class="lbl">' + esc(def.label) + '</span>';
       item(s, row, { action: def.action });
       rows.push(row);
     }
@@ -1527,10 +1520,6 @@
 
     var notice = add(el, mk('p', 'notice t-notice'));
     notice.innerHTML = esc(NOTICE_1) + '<br>' + esc(NOTICE_2);
-
-    add(el, mk('div', 'hints t-hints',
-      '<span><b class="key">&uarr;</b><b class="key">&darr;</b> navegar</span>' +
-      '<span><b class="key">Enter</b> confirmar</span>'));
 
     add(el, mk('div', 't-stamp', 'Guitarrada Hero <b>&middot;</b> 2026 <b>&middot;</b> Belém do Pará'));
 
@@ -3797,11 +3786,9 @@
         call('Stage', 'setCrowdEnabled', v);
       }
     });
-    row(col2, {
-      label: 'Plateia nos menus', kind: 'toggle',
-      get: function () { return !!setting('crowdAmbience', true); },
-      set: function (v) { setSetting('crowdAmbience', v); call('Audio', 'ambience', v, 0.5); }
-    });
+    /* Nao ha mais chave "Plateia nos menus": o volume da plateia (0 = mudo)
+       ja faz esse papel, e a chave salva desligada deixava o titulo mudo sem
+       o jogador lembrar por que. */
 
     add(col2, mk('div', 'st-h', 'Jogo'));
     row(col2, {
