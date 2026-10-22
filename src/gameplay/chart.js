@@ -556,7 +556,7 @@
         raw = song.charts[difficulty];
         if (!raw || !raw.length) {
           /* Fallback defensivo: a dificuldade pedida pode nao existir. */
-          var order = ['guitarrada', 'dificil', 'medio', 'facil'];
+          var order = ['guitarrada', 'dificil', 'puxado', 'medio', 'facil'];
           for (var f = 0; f < order.length && !(raw && raw.length); f++) raw = song.charts[order[f]];
           if (!raw || !raw.length) {
             for (var key in song.charts) {

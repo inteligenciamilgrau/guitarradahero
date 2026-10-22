@@ -635,7 +635,7 @@
       soloScale: 'blues',
       pool: 'guitarrada',
       ornament: 0.30,
-      stars: { facil: 2, medio: 4, dificil: 7, guitarrada: 9 },
+      stars: { facil: 2, medio: 4, puxado: 5, dificil: 7, guitarrada: 9 },
       drumPattern: 'rock',
       drumVariant: 'guitarrada-marcha',
       bassPattern: 'guitarrada-drive',
@@ -681,7 +681,7 @@
       soloScale: 'dorian',
       pool: 'carimbo',
       ornament: 0.50,
-      stars: { facil: 2, medio: 3, dificil: 6, guitarrada: 8 },
+      stars: { facil: 2, medio: 3, puxado: 4, dificil: 6, guitarrada: 8 },
       drumPattern: 'carimbo',
       drumVariant: 'carimbo-curimbo',
       bassPattern: 'carimbo-pulse',
@@ -727,7 +727,7 @@
       soloScale: 'aeolian',
       pool: 'lambada',
       ornament: 0.36,
-      stars: { facil: 3, medio: 5, dificil: 7, guitarrada: 9 },
+      stars: { facil: 3, medio: 5, puxado: 6, dificil: 7, guitarrada: 9 },
       drumPattern: 'brega',
       drumVariant: 'lambada-merengue',
       bassPattern: 'lambada-bounce',
@@ -773,7 +773,7 @@
       soloScale: 'majorPent',
       pool: 'brega',
       ornament: 0.60,
-      stars: { facil: 2, medio: 3, dificil: 5, guitarrada: 7 },
+      stars: { facil: 2, medio: 3, puxado: 4, dificil: 5, guitarrada: 7 },
       drumPattern: 'brega',
       drumVariant: 'calypso-caixa',
       bassPattern: 'calypso-bounce',
@@ -819,7 +819,7 @@
       soloScale: 'major',
       pool: 'frevo',
       ornament: 0.18,
-      stars: { facil: 3, medio: 5, dificil: 8, guitarrada: 10 },
+      stars: { facil: 3, medio: 5, puxado: 6, dificil: 8, guitarrada: 10 },
       drumPattern: 'frevo',
       drumVariant: 'frevo-marcha',
       bassPattern: 'frevo-march',
@@ -865,7 +865,7 @@
       soloScale: 'minorPent',
       pool: 'sambarock',
       ornament: 0.62,
-      stars: { facil: 2, medio: 4, dificil: 6, guitarrada: 8 },
+      stars: { facil: 2, medio: 4, puxado: 5, dificil: 6, guitarrada: 8 },
       drumPattern: 'sambarock',
       drumVariant: 'partido-alto',
       bassPattern: 'samba-partido',
@@ -899,7 +899,7 @@
      nps      = alvo de gems por segundo (media da musica).
      =========================================================================== */
 
-  var DIFF_ORDER = ['facil', 'medio', 'dificil', 'guitarrada'];
+  var DIFF_ORDER = ['facil', 'medio', 'puxado', 'dificil', 'guitarrada'];
 
   var DIFFS = {
     facil: {
@@ -911,6 +911,14 @@
       key: 'medio', lanes: 4, nps: 2.20, minGap16: 1.6, minGapAbs: 0.155,
       maxChord: 2, hopo: false, tap: false, open: true, openEvery: 1,
       sustainMin: 0.28, sustainBeats: 0.85, sustainTrim: 0.065, chordKeep: 0.70, maxRatio: 0.60, salt: 0x22
+    },
+    /* A ponte entre o Medio e o Dificil: as cinco raias e densidade no meio
+       do caminho, mas UMA nota de cada vez (sem acordes) e sem HOPO — o
+       jogador aprende o braco inteiro antes de aprender os atalhos. */
+    puxado: {
+      key: 'puxado', lanes: 5, nps: 2.85, minGap16: 1.25, minGapAbs: 0.125,
+      maxChord: 1, hopo: false, tap: false, open: true, openEvery: 1,
+      sustainMin: 0.26, sustainBeats: 0.80, sustainTrim: 0.06, maxRatio: 0.72, salt: 0x2B
     },
     dificil: {
       key: 'dificil', lanes: 5, nps: 3.55, minGap16: 0.95, minGapAbs: 0.092,
@@ -927,6 +935,7 @@
   var DIFF_LABELS = {
     facil: 'Fácil',
     medio: 'Médio',
+    puxado: 'Puxado',
     dificil: 'Difícil',
     guitarrada: 'Guitarrada'
   };
@@ -2157,6 +2166,7 @@
       difficultyStars: {
         facil: def.stars.facil,
         medio: def.stars.medio,
+        puxado: (typeof def.stars.puxado === 'number') ? def.stars.puxado : Math.round((def.stars.medio + def.stars.dificil) / 2),
         dificil: def.stars.dificil,
         guitarrada: def.stars.guitarrada
       },
@@ -2304,6 +2314,7 @@
   songs.difficultyLabels = {
     facil: DIFF_LABELS.facil,
     medio: DIFF_LABELS.medio,
+    puxado: DIFF_LABELS.puxado,
     dificil: DIFF_LABELS.dificil,
     guitarrada: DIFF_LABELS.guitarrada
   };

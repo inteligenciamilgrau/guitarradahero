@@ -1105,6 +1105,55 @@
     releaseAt([src, body, tone, g, pan.input, pan.output], t + 0.75);
   }
 
+  /* DICA SONORA DE TEMPO — o jogador tem que OUVIR como foi o acerto, sem
+     tirar o olho da pista:
+       perfeito  -> "plim": sino curto afinado na nota tocada (duas oitavas
+                    acima, fica dentro do tom da musica);
+       adiantado -> "bip" curto SUBINDO: chegou antes;
+       atrasado  -> "bup" curto DESCENDO: chegou depois.
+     Baixo e seco, por cima da corda do acerto. Numa rajada de HOPO/tap o
+     sino nao metralha: no maximo um a cada 90 ms. */
+  var lastJudgeAt = -1;
+  function sfxJudge(kind, midi) {
+    if (!ctx || !graphOk) return;
+    var t = now();
+    if (kind === 'perfect' && t - lastJudgeAt < 0.09) return;
+    if (!takeVoice()) return;
+    lastJudgeAt = t;
+    var g = ctx.createGain(), nodes = [g], end;
+    g.gain.setValueAtTime(0.0001, t);
+    g.connect(sfxOut());
+    if (kind === 'perfect') {
+      var m = (midi > 0) ? midi : 76;
+      while (m < 84) m += 12;
+      while (m > 96) m -= 12;
+      var f = 440 * Math.pow(2, (m - 69) / 12);
+      var a = osc('sine', f, t);
+      var b = osc('sine', f * 2.01, t);          /* parcial de sino, um tico fora */
+      var gb = ctx.createGain(); gb.gain.value = 0.35;
+      a.connect(g); b.connect(gb); gb.connect(g);
+      end = t + 0.38;
+      g.gain.linearRampToValueAtTime(0.18, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, end);
+      a.start(t); b.start(t); a.stop(end + 0.02); b.stop(end + 0.02);
+      nodes.push(a, b, gb);
+    } else {
+      /* uma oitava e meia de deslize em 110 ms: a direcao fica obvia */
+      var up = (kind === 'early');
+      var o = osc('triangle', up ? 620 : 1500, t);
+      o.frequency.exponentialRampToValueAtTime(up ? 1600 : 520, t + 0.11);
+      var lp = filt('lowpass', up ? 6000 : 2800, 0.7);
+      o.connect(lp); lp.connect(g);
+      end = t + 0.13;
+      g.gain.linearRampToValueAtTime(0.15, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, end);
+      o.start(t); o.stop(end + 0.02);
+      nodes.push(o, lp);
+    }
+    zeroAt(g.gain, end);
+    releaseAt(nodes, end + 0.1);
+  }
+
   // Erro: corda abafada raspada. Tem que ser DESAGRADAVEL sem ser estridente —
   // ruido com pitch caindo, banda estreita varrendo pra baixo e um pouco de
   // saturacao suja por cima.
@@ -1887,6 +1936,7 @@
     hit: function (lane, quality, midi) { try { sfxHit(lane, quality, midi); } catch (e) {} },
     miss: function () { try { sfxMiss(); } catch (e) {} },
     openHit: function (midi) { try { sfxOpenHit(midi); } catch (e) {} },
+    judge: function (kind, midi) { try { sfxJudge(kind, midi); } catch (e) {} },
     starPowerOn: function () { try { sfxStarPowerOn(); } catch (e) {} },
     starPowerOff: function () { try { sfxStarPowerOff(); } catch (e) {} },
     streakUp: function (n) { try { sfxStreakUp(n); } catch (e) {} },

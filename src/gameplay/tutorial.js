@@ -309,7 +309,7 @@
       genre: 'Aula',
       bpm: BPM, timeSig: [4, 4], year: 2026, palette: 'para', seed: 0x7E7A00 + i,
       key: 'A', scale: 'major', soloScale: 'major', pool: 'guitarrada',
-      stars: { facil: 1, medio: 1, dificil: 1, guitarrada: 1 },
+      stars: { facil: 1, medio: 1, puxado: 1, dificil: 1, guitarrada: 1 },
       drumPattern: 'rock', drumVariant: 'guitarrada-marcha', bassPattern: 'guitarrada-drive',
       percussion: ['ganza', 'agogo'],
       instruments: { guitar: 'guitarrada-clean', bass: 'round-wound', keys: 'organ-soft', brass: false },

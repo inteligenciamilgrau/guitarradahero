@@ -51,10 +51,11 @@ jogo sugere um pela placa de vídeo do PC, e baixa sozinho se a música engasgar
 
 - **6 músicas originais**, compostas proceduralmente em 6 gêneros brasileiros:
   guitarrada, carimbó, lambada, brega, frevo e samba-rock.
-- **4 dificuldades** por música — a mais difícil se chama **Guitarrada**. No
-  Fácil e no Médio as 3 ou 4 raias trocam de lado a cada Star Power (meio,
-  direita, esquerda...), para todos os dedos treinarem; setas embaixo dos
-  aros avisam a troca.
+- **5 dificuldades** por música: Fácil, Médio, Puxado, Difícil e
+  **Guitarrada** (a mais difícil). No Fácil e no Médio as 3 ou 4 raias trocam
+  de lado a cada Star Power (meio, direita, esquerda...), para todos os dedos
+  treinarem; setas embaixo dos aros avisam a troca. O Puxado já usa as cinco
+  raias, mas sem acordes e sem HOPOs.
 - **Tutorial interativo** em 8 lições curtas, com banda tocando junto: cada
   lição só passa quando o jogador bate a meta, e um "treinador" explica cada
   erro na hora (faltou palhetar, tecla errada, soltou cedo...). As teclas

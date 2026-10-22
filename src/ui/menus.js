@@ -970,7 +970,7 @@
       if (!isFinite(n)) return min;
       return n < min ? min : (n > max ? max : n);
     };
-    var ALLOWED_DIFF = ['facil', 'medio', 'dificil', 'guitarrada'];
+    var ALLOWED_DIFF = ['facil', 'medio', 'puxado', 'dificil', 'guitarrada'];
     var d = String(o.difficulty === undefined || o.difficulty === null ? '' : o.difficulty);
     var okDiff = false, i;
     for (i = 0; i < ALLOWED_DIFF.length; i++) if (ALLOWED_DIFF[i] === d) okDiff = true;
@@ -1577,7 +1577,7 @@
      9. DIFICULDADES — tabela compartilhada por varias telas
      ========================================================================= */
 
-  var DIFF_ORDER = ['facil', 'medio', 'dificil', 'guitarrada'];
+  var DIFF_ORDER = ['facil', 'medio', 'puxado', 'dificil', 'guitarrada'];
 
   var DIFF_INFO = {
     facil: {
@@ -1590,9 +1590,14 @@
       desc: 'Quatro raias e os primeiros acordes de duas notas. Direita e esquerda se revezam a cada Star Power.',
       hue: 48
     },
+    puxado: {
+      label: 'Puxado', tag: 'III', lanes: '5 raias',
+      desc: 'As cinco raias, mas uma nota de cada vez: sem acordes e sem HOPOs. A ponte para o Difícil.',
+      hue: 24
+    },
     dificil: {
-      label: 'Difícil', tag: 'III', lanes: '5 raias',
-      desc: 'As cinco raias, HOPOs e sustains longos. Já é show de verdade, com plateia.',
+      label: 'Difícil', tag: 'IV', lanes: '5 raias',
+      desc: 'As cinco raias, acordes de duas notas, HOPOs e sustains longos. Já é show de verdade, com plateia.',
       hue: 217
     },
     guitarrada: {
@@ -3865,7 +3870,8 @@
     row(pgJogo, {
       label: 'Dificuldade preferida', kind: 'choice',
       options: [{ v: 'facil', label: 'Fácil' }, { v: 'medio', label: 'Médio' },
-                { v: 'dificil', label: 'Difícil' }, { v: 'guitarrada', label: 'Guitarrada' }],
+                { v: 'puxado', label: 'Puxado' }, { v: 'dificil', label: 'Difícil' },
+                { v: 'guitarrada', label: 'Guitarrada' }],
       get: function () { return setting('difficulty', 'medio'); },
       set: function (v) { setSetting('difficulty', v); selectedDifficulty = v; }
     });
@@ -3890,6 +3896,20 @@
       options: [{ v: 'clube', label: 'Clube' }, { v: 'arena', label: 'Arena' }],
       get: function () { return setting('reverbIR', 'clube'); },
       set: function (v) { setSetting('reverbIR', v); call('Audio', 'setReverbIR', v); }
+    });
+    row(pgAud, {
+      label: 'Som da palhetada', kind: 'toggle',
+      get: function () { return setting('strumSfx', true) !== false; },
+      set: function (v) { setSetting('strumSfx', v); }
+    });
+    row(pgAud, {
+      label: 'Som de tempo no acerto', kind: 'toggle',
+      get: function () { return setting('timingCues', true) !== false; },
+      set: function (v) {
+        setSetting('timingCues', v);
+        /* liga: toca um "plim" de exemplo para o jogador saber o que esperar */
+        if (v && GH.Audio && GH.Audio.sfx && GH.Audio.sfx.judge) GH.Audio.sfx.judge('perfect', 76);
+      }
     });
 
     /* ---- CONTROLES ----------------------------------------------------- */
@@ -4095,9 +4115,12 @@
       'com o teste ligado, <b>Enter</b> é sempre batida. Aperte <b>Esc</b> para parar ' +
       '(a medida fica guardada) e depois <b>aplicar desvio medido</b>: ' +
       'o jogo compensa sozinho.');
-    note('audio', '<span class="t">Saída de áudio</span>' +
-      '<b>Estável</b> (padrão) dá folga contra cortes; <b>Rápida</b> tem menos atraso, ' +
-      'mas pode picotar. Vale após recarregar (F5). Volume 0 cala o canal por completo.');
+    note('audio', '<span class="t">Som de tempo</span>' +
+      'A cada acerto: <b>plim</b> = perfeito; <b>bip subindo</b> = você adiantou; ' +
+      '<b>bup descendo</b> = você atrasou. Segue o volume de Efeitos. Desligue o ' +
+      '<b>som da palhetada</b> para ouvir só as dicas.<br>' +
+      '<b>Saída de áudio</b>: <b>Estável</b> (padrão) dá folga contra cortes; <b>Rápida</b> ' +
+      'tem menos atraso, mas pode picotar. Vale após recarregar (F5).');
     note('video', '<span class="t">Qualidade</span>' +
       '<b>Leve</b>: PC fuleiro ou notebook simples — resolução menor, sem sombra. ' +
       '<b>Média</b>: PC comum. <b>Alta</b>: PC bom, com placa de vídeo. ' +

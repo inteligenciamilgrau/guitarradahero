@@ -114,7 +114,7 @@
   var MILESTONES = [10, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000];
 
   var DIFF_LABEL = {
-    facil: 'FÁCIL', medio: 'MÉDIO', dificil: 'DIFÍCIL', guitarrada: 'GUITARRADA'
+    facil: 'FÁCIL', medio: 'MÉDIO', puxado: 'PUXADO', dificil: 'DIFÍCIL', guitarrada: 'GUITARRADA'
   };
 
   /* =========================================================================

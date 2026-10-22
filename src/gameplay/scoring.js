@@ -95,6 +95,7 @@
   var DIFFICULTY = {
     facil:      { good: 0.095, perfect: 0.035, heal: 0.020, miss: -0.040, over: -0.020, start: 0.60 },
     medio:      { good: 0.082, perfect: 0.028, heal: 0.015, miss: -0.048, over: -0.026, start: 0.55 },
+    puxado:     { good: 0.076, perfect: 0.026, heal: 0.0135, miss: -0.052, over: -0.028, start: 0.52 },
     dificil:    { good: 0.070, perfect: 0.025, heal: 0.012, miss: -0.055, over: -0.030, start: 0.50 },
     guitarrada: { good: 0.070, perfect: 0.025, heal: 0.010, miss: -0.062, over: -0.034, start: 0.50 },
     _default:   { good: 0.070, perfect: 0.025, heal: 0.012, miss: -0.055, over: -0.030, start: 0.50 }

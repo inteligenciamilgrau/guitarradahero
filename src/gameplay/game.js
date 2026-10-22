@@ -41,7 +41,7 @@
   var IS_STATE = {};
   (function () { for (var i = 0; i < STATES.length; i++) IS_STATE[STATES[i]] = true; })();
 
-  var DIFFICULTIES = ['facil', 'medio', 'dificil', 'guitarrada'];
+  var DIFFICULTIES = ['facil', 'medio', 'puxado', 'dificil', 'guitarrada'];
 
   /* Batidas de contagem regressiva antes da musica (visual + som). */
   var COUNTDOWN_BEATS = 3;
@@ -731,9 +731,17 @@
     if (perfect) mcall('Engine', 'bloomPulse', 0.055 + 0.02 * Math.min(4, mult), 5.0);
     if (e.chord) mcall('Engine', 'kick', 0.030 + 0.006 * e.chordSize);
 
-    /* --- som --- */
-    if (e.open) sfx('openHit', noteMidi(e.noteIdx));
-    else sfx('hit', lanes.length ? lanes[0] : 0, e.quality, noteMidi(e.noteIdx));
+    /* --- som --- (a corda do acerto pode ser desligada nas Opcoes: sobra a
+       dica de tempo, que fica bem mais facil de ouvir) */
+    if (!(GH.Settings && GH.Settings.strumSfx === false)) {
+      if (e.open) sfx('openHit', noteMidi(e.noteIdx));
+      else sfx('hit', lanes.length ? lanes[0] : 0, e.quality, noteMidi(e.noteIdx));
+    }
+    /* dica de tempo: plim = perfeito, bip subindo = adiantou, bup descendo =
+       atrasou. O bot do modo demo/captura nao precisa de aula. */
+    if (e.source !== 'auto' && !(GH.Settings && GH.Settings.timingCues === false)) {
+      sfx('judge', perfect ? 'perfect' : (e.deltaMs < 0 ? 'early' : 'late'), noteMidi(e.noteIdx));
+    }
 
     /* --- guitarra volta a soar --- */
     mcall('Synth', 'setGuitarMuted', false);

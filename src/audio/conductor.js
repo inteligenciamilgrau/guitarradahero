@@ -54,6 +54,8 @@
     lefty: false,           // inverte a ordem das raias
     showFPS: false,
     hitFlash: true,         // flash de tela no acerto (pode incomodar)
+    timingCues: true,       // som de perfeito / adiantado / atrasado no acerto
+    strumSfx: true,         // corda tocada a cada acerto (a "palhetada")
     crowdAmbience: true,    // leito de plateia continuo nos menus
     crowd3D: true,          // publico instanciado e animado ao fundo do palco
     calibrated: false,      // o jogador ja passou pela calibracao?
@@ -69,7 +71,7 @@
   };
 
   var VALID_QUALITY = { low: 1, med: 1, high: 1, ultra: 1 };
-  var VALID_DIFF = { facil: 1, medio: 1, dificil: 1, guitarrada: 1 };
+  var VALID_DIFF = { facil: 1, medio: 1, puxado: 1, dificil: 1, guitarrada: 1 };
   var VALID_IR = { clube: 1, arena: 1 };
 
   function clampNum(v, lo, hi, fallback) {
@@ -108,6 +110,8 @@
     if (typeof src.lefty !== 'undefined') target.lefty = !!src.lefty;
     if (typeof src.showFPS !== 'undefined') target.showFPS = !!src.showFPS;
     if (typeof src.hitFlash !== 'undefined') target.hitFlash = !!src.hitFlash;
+    if (typeof src.timingCues !== 'undefined') target.timingCues = !!src.timingCues;
+    if (typeof src.strumSfx !== 'undefined') target.strumSfx = !!src.strumSfx;
     if (typeof src.crowdAmbience !== 'undefined') target.crowdAmbience = !!src.crowdAmbience;
     if (typeof src.crowd3D !== 'undefined') target.crowd3D = !!src.crowd3D;
     if (typeof src.calibrated !== 'undefined') target.calibrated = !!src.calibrated;
@@ -170,6 +174,8 @@
       lefty: GH.Settings.lefty,
       showFPS: GH.Settings.showFPS,
       hitFlash: GH.Settings.hitFlash,
+      timingCues: GH.Settings.timingCues,
+      strumSfx: GH.Settings.strumSfx,
       crowdAmbience: GH.Settings.crowdAmbience,
       crowd3D: GH.Settings.crowd3D,
       calibrated: GH.Settings.calibrated,
