@@ -935,7 +935,12 @@
         case 'pause':
           if (state === 'playing' || state === 'countdown') setState('paused');
           else if (state === 'paused') setState('playing', { fromPause: true });
-          else if (state === 'settings' || state === 'credits') setState('title');
+          /* Nos menus, Esc e "voltar" — o mesmo caminho do Backspace, e
+             quem decide para onde e cada tela (musica -> titulo, dificuldade
+             -> musica...). Antes so configuracoes e creditos voltavam; na
+             escolha de musica e de dificuldade o Esc nao fazia nada, apesar
+             do rodape dizer "Esc voltar". */
+          else menuBack();
           break;
 
         case 'starpower':
