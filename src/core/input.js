@@ -336,6 +336,10 @@
   var codeMap = {};
 
   var bindings = cloneBindings(DEFAULT_BINDINGS);
+  /* Monta o mapa ja com os padroes. loadBindings() so reconstroi quando ha
+   * algo salvo; num navegador sem 'gh.bindings' (PC novo, aba anonima) o mapa
+   * ficava vazio e NENHUMA tecla respondia ate o jogador redefinir uma. */
+  rebuildCodeMap();
 
   /* Updater registrado no engine (para poder remover) */
   var engineUpdater = null;
