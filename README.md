@@ -41,6 +41,10 @@ Também funciona com **gamepad**. Se estiver errando tudo, vá em
 **Opções → Calibração** e ajuste a latência do seu setup — em jogo de ritmo isso
 faz toda a diferença.
 
+Em **Opções → Qualidade** há três níveis: **Leve** (PC fraco ou notebook
+simples), **Média** e **Alta** (PC com placa de vídeo). Na primeira abertura o
+jogo sugere um pela placa de vídeo do PC, e baixa sozinho se a música engasgar.
+
 ---
 
 ## O que tem dentro

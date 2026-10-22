@@ -2455,6 +2455,9 @@
                         (e.degraded ? ' — AUTO-DEGRADOU' : '') +
                         ', quedas automáticas: ' + e.autoDowngrades +
                         ', auto ' + (e.autoQuality ? 'ligada' : 'desligada'));
+      line('sugerida para este PC', (e.suggestedQuality || '—') + (e.suggestedWhy ? ' (' + e.suggestedWhy + ')' : ''));
+      line('monitor', (e.refreshHz ? nInt(e.refreshHz) + ' Hz' : '—') +
+                      (e.frameSkip > 1 ? ', desenhando 1 a cada ' + e.frameSkip + ' quadros (teto do nível)' : ', sem teto'));
       line('anti-serrilhado', e.aa + (e.composer ? '' : ' (composer DESLIGADO)'));
       line('sombras', e.shadowHz + ' Hz');
       line('aquecimento', (e.warmedUp ? 'feito em ' + nInt(e.warmupMs) + ' ms' : 'ainda não'));

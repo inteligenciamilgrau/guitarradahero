@@ -477,18 +477,37 @@
          - particulas e publico no minimo que os subsistemas aceitam.
        --------------------------------------------------------------------- */
     software: { renderScale: 0.60, pixelRatioMax: 1.0, shadows: false, shadowMapSize: 512,
-             bloomScale: 0.18, bloomEnabled: false, gradeLite: true, aa: 'off', msaa: 0,
+             bloomScale: 0.18, bloomEnabled: false, gradeLite: true, aa: 'off', msaa: 0, fpsCap: 60,
              particles: 0.12, crowd: 0.10, detail: 0.0, reflections: false, texScale: 0.35, maxLights: 3,  anisotropy: 1,  shadowHz: 4 },
-    low:   { renderScale: 0.70, shadows: false, shadowMapSize:  512, bloomScale: 0.30, aa: 'fxaa', msaa: 0,
+    /* OS TRES NIVEIS DO MENU — Leve (PC fuleiro), Media, Alta (PC bom).
+       Medido numa Intel UHD integrada em 1080p (ver secao 14.4): o custo e
+       quase todo de PIXEL, entao o que mais pesa e a resolucao interna.
+       - pixelRatioMax: notebook com escala de tela de 125-150% multiplicava
+         os pixels; o 'low' antigo, sem teto, desenhava MAIS que um 1080p.
+       - fpsCap: desenha 1 a cada N quadros do monitor (secao 14.5). Em tela
+         de 144/165 Hz e metade (ou menos) do trabalho de GPU e de CPU — e a
+         CPU livre e a mesma que serve o audio. */
+    low:   { renderScale: 0.62, pixelRatioMax: 1.0, shadows: false, shadowMapSize:  512, bloomScale: 0.30, aa: 'fxaa', msaa: 0,
+             gradeLite: true, fpsCap: 60,
              particles: 0.35, crowd: 0.30, detail: 0.0, reflections: false, texScale: 0.50, maxLights: 4,  anisotropy: 1,  shadowHz: 8 },
-    med:   { renderScale: 0.85, shadows: true,  shadowMapSize: 1024, bloomScale: 0.45, aa: 'fxaa', msaa: 0,
+    med:   { renderScale: 0.85, pixelRatioMax: 1.25, shadows: true,  shadowMapSize: 1024, bloomScale: 0.45, aa: 'fxaa', msaa: 0,
+             fpsCap: 60,
              particles: 0.65, crowd: 0.60, detail: 0.0, reflections: false, texScale: 0.75, maxLights: 6,  anisotropy: 4,  shadowHz: 12 },
     high:  { renderScale: 1.00, shadows: true,  shadowMapSize: 2048, bloomScale: 0.60, aa: 'smaa', msaa: 0,
              particles: 1.00, crowd: 1.00, detail: 1.0, reflections: true,  texScale: 1.00, maxLights: 8,  anisotropy: 8,  shadowHz: 20 },
+    /* Fora do menu desde a revisao de qualidade: custava 1,7x o 'high' na
+       integrada sem diferenca visivel na pista. Pedido salvo como 'ultra'
+       vira 'high' (normQuality). A linha fica para quem chamar por codigo. */
     ultra: { renderScale: 1.00, shadows: true,  shadowMapSize: 4096, bloomScale: 0.80, aa: 'smaa', msaa: 4,
              particles: 1.35, crowd: 1.35, detail: 1.0, reflections: true,  texScale: 1.00, maxLights: 10, anisotropy: 16, shadowHz: 30 }
   };
-  var QUALITY_ORDER = ['software', 'low', 'med', 'high', 'ultra'];
+  var QUALITY_ORDER = ['software', 'low', 'med', 'high'];
+
+  function normQuality(q) {
+    q = (typeof q === 'string') ? q.toLowerCase() : '';
+    if (q === 'ultra') return 'high';
+    return QUALITY_TIERS[q] ? q : '';
+  }
 
   /* INDICE PUBLICO — nao e o indice em QUALITY_ORDER, de proposito.
      GH.Stage le `qualityScale.index` para decidir a cadencia da plateia com a
@@ -641,6 +660,12 @@
     autoQuality: true,
     autoDowngrades: 0,
     qualityCooldown: 0,
+
+    /* teto de quadros (secao 14.5) */
+    vsyncMs: 0,          /* periodo medido do monitor */
+    vsWin: [], vsWinAt: 0, vsLast: 0,
+    frameSkip: 1,        /* desenha 1 a cada N quadros do monitor */
+    vsyncCount: 0,
 
     /* fps */
     fps: 60, fpsInstant: 60, fpsAvg: 60, fpsSamples: [], fpsAccum: 0, fpsFrames: 0,
@@ -1556,7 +1581,7 @@
   }
 
   function setQuality(name, opts) {
-    var key = (typeof name === 'string') ? name.toLowerCase() : state.quality;
+    var key = (typeof name === 'string') ? normQuality(name) : state.quality;
     if (!QUALITY_TIERS[key]) key = 'high';
     var manual = !(opts && opts.auto === true);
     if (manual) {
@@ -1713,10 +1738,13 @@
     /* decide pelo pior entre a media exponencial e a media das amostras de
        1s: descer de qualidade e barato, subir de novo e que e caro. */
     var f = (state.fpsSamples.length >= 2) ? Math.min(state.fps, state.fpsAvg) : state.fps;
-    if (f < 46) {
+    /* com teto de quadros (14.5) o alvo pode ser 55 (165 Hz / 3): os limites
+       acompanham o alvo, senao o nivel nunca pareceria "folgado" para subir */
+    var goal = (state.frameSkip > 1 && state.vsyncMs > 0) ? Math.min(60, 1000 / state.vsyncMs / state.frameSkip) : 60;
+    if (f < 46 * goal / 60) {
       state.slowSeconds += dt;
       state.fastSeconds = 0;
-    } else if (f > 57.5) {
+    } else if (f > 57.5 * goal / 60) {
       state.fastSeconds += dt;
       state.slowSeconds = 0;
     } else {
@@ -2379,9 +2407,46 @@
     }
   }
 
+  /* =======================================================================
+     14.5 TETO DE QUADROS (Leve / Medio)
+     O monitor dita o rAF: numa tela de 165 Hz o jogo desenhava 165 quadros
+     por segundo mesmo no nivel mais leve — trabalho de GPU e de CPU jogado
+     fora, e a CPU e a mesma que serve o audio. Aqui medimos o periodo do
+     monitor (a MEDIANA dos intervalos de cada segundo: nem o quadro lento
+     nem o rAF disparado as pressas depois dele enganam a conta) e
+     desenhamos 1 a cada N quadros dele, N = round(Hz / teto).
+     Pular sempre o MESMO numero mantem a rolagem da pista regular:
+     165 Hz -> 55 fps, 144 -> 72, 120 -> 60, 60 -> 60. Alternar 2 e 3 para
+     cravar 60 daria tranco visivel nas notas.
+     ======================================================================= */
+  function frameSkipFor(now) {
+    var vs = now - state.vsLast;
+    state.vsLast = now;
+    var win = state.vsWin;
+    if (vs > 2 && vs < 50 && win.length < 400) win.push(vs);
+    if (now - state.vsWinAt >= 1000) {
+      if (win.length >= 10) {
+        win.sort(function (a, b) { return a - b; });
+        state.vsyncMs = win[win.length >> 1];
+      }
+      win.length = 0;
+      state.vsWinAt = now;
+    }
+    var tier = QUALITY_TIERS[state.quality];
+    var cap = (tier && tier.fpsCap && !isCapture()) ? tier.fpsCap : 0;
+    if (!cap || !(state.vsyncMs > 0)) return 1;
+    return Math.max(1, Math.round(1000 / state.vsyncMs / cap));
+  }
+
   function tick(now) {
     if (!state.running) return;
     state.rafId = requestAnimationFrame(tick);
+
+    state.frameSkip = frameSkipFor(now);
+    if (state.frameSkip > 1) {
+      if (++state.vsyncCount < state.frameSkip) return;
+      state.vsyncCount = 0;
+    }
 
     var raw = (now - state.lastTime) / 1000;
     state.lastTime = now;
@@ -2656,19 +2721,28 @@
     /* --- pos-processamento --- */
     /* Qualidade inicial, por ordem de prioridade:
          1) o que o chamador pediu em opts;
-         2) o que o JOGADOR salvou em GH.Settings (fora do modo captura);
-         3) o palpite pelo tamanho de tela / dispositivo.
+         2) o que o JOGADOR escolheu no menu (GH.Settings.qualityChosen);
+         3) a sugestao para esta maquina (secao 14.4).
        O passo (2) e o que faz a preferencia salva valer JA no primeiro frame,
        sem depender de alguem lembrar de chamar GH.Settings.apply() no boot.
+       Sem escolha, a sugestao vira a qualidade "salva" em memoria: assim o
+       menu mostra o nivel em uso e quem reaplica GH.Settings.quality depois
+       (Settings.apply, o gancho de onChange) nao a desfaz.
        Em modo captura ignoramos o localStorage de proposito: o print tem que
        sair igual em qualquer maquina. */
+    var sug = suggestQuality();
+    GH.Engine.suggestedQuality = sug.q;
+    GH.Engine.suggestedWhy = sug.why;
     var savedQuality = null;
     try {
-      if (!isCapture() && GH.Settings && QUALITY_TIERS[GH.Settings.quality]) savedQuality = GH.Settings.quality;
+      if (!isCapture() && GH.Settings && GH.Settings.qualityChosen) savedQuality = normQuality(GH.Settings.quality) || null;
     } catch (e) { savedQuality = null; }
     state.quality = state.requestedQuality =
       (opts.quality && QUALITY_TIERS[opts.quality]) ? opts.quality
-      : (savedQuality || pickInitialQuality());
+      : (savedQuality || (isCapture() ? 'high' : sug.q));
+    try {
+      if (!isCapture() && GH.Settings && !savedQuality) GH.Settings.quality = state.quality;
+    } catch (eS) { /* sem GH.Settings: so o engine sabe */ }
 
     /* ---- MODO DE SOBREVIVENCIA POR SOFTWARE ----------------------------
        Se quem esta rasterizando e a CPU, o nivel escolhido acima nao importa:
@@ -2741,17 +2815,47 @@
     resizeTimer = setTimeout(function () { resizeTimer = 0; try { resize(); } catch (e) { warn('resize falhou', e); } }, 80);
   }
 
-  /* chute inicial de qualidade: telas grandes/densas comecam mais modestas */
-  function pickInitialQuality() {
-    if (isCapture()) return 'high';
-    try {
-      var dpr = baseDevicePixelRatio();
-      var px = (window.innerWidth || 1280) * (window.innerHeight || 720) * dpr * dpr;
-      var mob = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
-      if (mob) return 'med';
-      if (px > 4200000) return 'med';   /* 4K+ */
-      return 'high';
-    } catch (e) { return 'high'; }
+  /* =======================================================================
+     14.4 SUGESTAO DE QUALIDADE PARA ESTA MAQUINA
+     Le a placa (nome sem mascara), os nucleos e a memoria e devolve um dos
+     tres niveis do menu: 'low' (Leve, PC fuleiro), 'med', 'high' (PC bom).
+     Vale enquanto o jogador nao escolher no menu. Se errar para cima, a
+     auto-degradacao (secao 9) ainda desce sozinha durante a musica.
+     MEDIDO (1080p, mesma partida, bot tocando):
+       Intel UHD integrada ... high 50 ms/quadro, med 34, low antigo 28
+       RTX 5060 dedicada ..... 6 ms em qualquer nivel (165 Hz)
+     ======================================================================= */
+  /* integradas da AMD (Ryzen) se chamam "Radeon" como as dedicadas */
+  var AMD_IGPU_RE = /radeon\s*\(tm\)\s*(r\d\s*)?graphics|radeon\s*vega\s*\d*\s*graphics|radeon\s*\d{3}m\b/i;
+  /* integradas que aguentam o nivel medio */
+  var GOOD_IGPU_RE = /iris|\bxe\b|arc\s*\(tm\)\s*graphics|radeon\s*[6-8]\d0m|apple\s*m\d/i;
+  /* dedicadas de entrada: o medio cabe, o alto engasga */
+  var ENTRY_DGPU_RE = /\bgt\s*\d{3,4}\b|gtx\s*(9\d0|10[3-5]0|1630|1650)\b|\bmx\s*\d{3}\b|radeon\s*(r[5-9]\s*\d{3}|rx\s*(4[6-9]0|5[0-6]0|6400|6500))\b|quadro\s*(k\d{3,4}|p[4-6]00|t[4-6]00)\b/i;
+
+  function suggestQuality() {
+    var g = gpuInfo, why = [], q;
+    var hay = (g.renderer + ' ' + g.vendor).toLowerCase();
+    var mob = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    if (g.software) { q = 'low'; why.push('sem aceleração de vídeo'); }
+    else if (mob) { q = 'low'; why.push('celular ou tablet'); }
+    else if (AMD_IGPU_RE.test(hay) || (g.integrated && !g.discrete)) {
+      var am = hay.match(/apple\s*m\d\s*(pro|max|ultra)/i);
+      if (am) { q = 'high'; why.push(am[0]); }
+      else if (GOOD_IGPU_RE.test(hay)) { q = 'med'; why.push('placa integrada boa'); }
+      else { q = 'low'; why.push('placa integrada'); }
+    } else if (g.discrete) {
+      if (ENTRY_DGPU_RE.test(hay)) { q = 'med'; why.push('placa dedicada de entrada'); }
+      else { q = 'high'; why.push('placa de vídeo dedicada'); }
+    } else { q = 'med'; why.push('placa não identificada'); }
+
+    var cores = navigator.hardwareConcurrency || 0;
+    var mem = navigator.deviceMemory || 0;           /* Chrome: no maximo 8 */
+    if ((cores && cores <= 2) || (mem && mem <= 2)) {
+      q = 'low'; why.push(cores <= 2 && cores ? cores + ' núcleos' : mem + ' GB de memória');
+    } else if (q === 'high' && ((cores && cores <= 4) || (mem && mem <= 4))) {
+      q = 'med'; why.push(cores <= 4 && cores ? cores + ' núcleos' : mem + ' GB de memória');
+    }
+    return { q: q, why: why.join(', ') };
   }
 
   /* =======================================================================
@@ -2818,6 +2922,10 @@
       /* --- imagem --- */
       quality: state.quality,
       requestedQuality: state.requestedQuality,
+      suggestedQuality: GH.Engine.suggestedQuality || '',
+      suggestedWhy: GH.Engine.suggestedWhy || '',
+      refreshHz: state.vsyncMs > 0 ? 1000 / state.vsyncMs : 0,
+      frameSkip: state.frameSkip,
       autoQuality: state.autoQuality,
       autoDowngrades: state.autoDowngrades,
       degraded: (qi >= 0 && ri >= 0 && qi < ri),

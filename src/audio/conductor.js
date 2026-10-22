@@ -44,7 +44,10 @@
 
     volumes: { master: 0.90, music: 0.85, guitar: 1.00, drums: 0.92, sfx: 0.80, crowd: 0.55 },
 
-    quality: 'high',        // 'low' | 'med' | 'high' | 'ultra'
+    quality: 'high',        // 'low' | 'med' | 'high' ('ultra' antigo vale 'high')
+    // O jogador escolheu a qualidade no menu? Sem escolha, o GH.Engine usa a
+    // SUGESTAO para esta maquina (placa, nucleos, memoria) a cada abertura.
+    qualityChosen: false,
     scrollSpeed: 14,        // unidades/segundo — alimenta GH.Chart.speed
     difficulty: 'medio',    // dificuldade preferida do jogador
     reverbIR: 'clube',      // 'clube' | 'arena'
@@ -99,6 +102,7 @@
     if (typeof src.videoOffsetMs !== 'undefined') target.videoOffsetMs = clampNum(src.videoOffsetMs, -500, 500, 0);
     if (typeof src.scrollSpeed !== 'undefined') target.scrollSpeed = clampNum(src.scrollSpeed, 6, 32, 14);
     if (src.quality && VALID_QUALITY[src.quality]) target.quality = src.quality;
+    if (typeof src.qualityChosen !== 'undefined') target.qualityChosen = !!src.qualityChosen;
     if (src.difficulty && VALID_DIFF[src.difficulty]) target.difficulty = src.difficulty;
     if (src.reverbIR && VALID_IR[src.reverbIR]) target.reverbIR = src.reverbIR;
     if (typeof src.lefty !== 'undefined') target.lefty = !!src.lefty;
@@ -159,6 +163,7 @@
       videoOffsetMs: GH.Settings.videoOffsetMs,
       volumes: GH.Settings.volumes,
       quality: GH.Settings.quality,
+      qualityChosen: GH.Settings.qualityChosen,
       scrollSpeed: GH.Settings.scrollSpeed,
       difficulty: GH.Settings.difficulty,
       reverbIR: GH.Settings.reverbIR,
@@ -235,6 +240,10 @@
         GH.Settings[k] = fresh[k];
       }
     }
+    /* "padrao" de qualidade e a sugestao para esta maquina, nao 'high' */
+    try {
+      if (GH.Engine && GH.Engine.suggestedQuality) GH.Settings.quality = GH.Engine.suggestedQuality;
+    } catch (eQ) { /* fica o padrao da tabela */ }
     settingsApply();
     settingsSave();
     notifySettings(null);

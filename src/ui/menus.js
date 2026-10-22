@@ -3761,12 +3761,23 @@
 
     /* ---- COLUNA 2: video + jogo -------------------------------------- */
     add(col2, mk('div', 'st-h', 'Vídeo'));
+    /* Tres niveis, um por tipo de PC. Sem escolha do jogador vale a sugestao
+       do GH.Engine para esta maquina (placa, nucleos, memoria); escolher aqui
+       grava qualityChosen e a escolha passa a valer em toda abertura. */
+    var Q_LABEL = { low: 'Leve', med: 'Média', high: 'Alta' };
     row(col2, {
       label: 'Qualidade', kind: 'choice',
-      options: [{ v: 'low', label: 'Baixa' }, { v: 'med', label: 'Média' },
-                { v: 'high', label: 'Alta' }, { v: 'ultra', label: 'Ultra' }],
-      get: function () { return setting('quality', 'high'); },
-      set: function (v) { setSetting('quality', v); call('Engine', 'setQuality', v); }
+      options: [{ v: 'low', label: Q_LABEL.low }, { v: 'med', label: Q_LABEL.med }, { v: 'high', label: Q_LABEL.high }],
+      get: function () { var q = setting('quality', 'high'); return Q_LABEL[q] ? q : 'high'; },
+      set: function (v) {
+        call('Settings', 'set', { quality: v, qualityChosen: true });
+        call('Engine', 'setQuality', v);
+      },
+      note: function (v) {
+        var sq = GH.Engine && GH.Engine.suggestedQuality;
+        if (!Q_LABEL[sq]) return '';
+        return sq === v ? 'sugerida' : 'sugerida: ' + Q_LABEL[sq];
+      }
     });
     row(col2, {
       label: 'Flash no acerto', kind: 'toggle',
@@ -4037,9 +4048,10 @@
       '<b>Rápida</b> tem menos atraso, mas pode picotar. Vale após recarregar (F5).';
     var n2 = add(col2, mk('div', 'st-note'));
     n2.innerHTML = '<span class="t">Qualidade</span>' +
-      '<b>Ultra</b> liga sombras suaves, bloom largo e SMAA. <b>Baixa</b> desliga sombra e ' +
-      'reduz a resolução interna — use se a taxa de quadros cair. A pista continua ' +
-      'legível em todos os níveis: espetáculo nunca atrapalha a jogabilidade.';
+      '<b>Leve</b>: PC fuleiro ou notebook simples — resolução menor, sem sombra. ' +
+      '<b>Média</b>: PC comum. <b>Alta</b>: PC bom, com placa de vídeo. ' +
+      'O jogo sugere um nível pela placa deste PC e baixa sozinho se a música engasgar. ' +
+      'A pista fica legível em todos.';
     var n3 = add(col3, mk('div', 'st-note'));
     n3.innerHTML = '<span class="t">Controle</span>' +
       'Nota = <b>traste</b> + <b>palhetada</b>: segure <b>A S D F G</b> e bata a ' +
