@@ -1062,22 +1062,28 @@
     return b;
   }
 
-  /* Registra um elemento como item navegavel. `def` descreve o comportamento. */
+  /* Registra um elemento como item navegavel. `def` descreve o comportamento.
+     `def.list` e a lista em que ele entrou: uma tela com submenus (Opcoes)
+     troca scr.items entre listas, e o mouse pode tocar num item de outra
+     lista — ensureList() leva a tela para ela antes de mexer no foco. */
   function item(scr, el, def) {
     def = def || {};
     def.el = el;
     def.index = scr.items.length;
     def.kind = def.kind || 'button';
+    def.list = scr.items;
     scr.items.push(def);
     el.classList.add('pe');
     /* mouse: passar por cima ja move o foco (como todo jogo bom faz) */
     el.addEventListener('mouseenter', function () {
       if (current !== scr) return;
+      ensureList(scr, def);
       if (scr.idx !== def.index) { setFocus(scr, def.index, true); }
     }, false);
     el.addEventListener('mousedown', function (ev) {
       if (current !== scr) return;
       ev.preventDefault();
+      ensureList(scr, def);
       setFocus(scr, def.index, false);
       activate(scr, def, ev);
     }, false);
@@ -1086,11 +1092,16 @@
       el.addEventListener('wheel', function (ev) {
         if (current !== scr) return;
         ev.preventDefault();
+        ensureList(scr, def);
         setFocus(scr, def.index, false);
         nudge(scr, def, ev.deltaY > 0 ? -1 : 1);
       }, { passive: false });
     }
     return def;
+  }
+
+  function ensureList(scr, def) {
+    if (def.list && scr.items !== def.list && scr.useList) scr.useList(def.list);
   }
 
   function setFocus(scr, i, playSound) {
@@ -3342,9 +3353,35 @@
   CSS.push([
     '#gh-menus .scr-settings .scrim{background:',
     'linear-gradient(180deg,rgba(3,2,9,.95) 0%,rgba(4,3,12,.86) 24%,rgba(4,3,12,.86) 74%,rgba(2,1,6,.97) 100%)}',
-    '#gh-menus .st-body{flex:1 1 auto;display:grid;grid-template-columns:1fr 1fr 1fr;',
-    'gap:calc(var(--u)*1.6);margin-top:calc(var(--u)*1.1);min-height:0}',
-    '#gh-menus .st-col{min-height:0;display:flex;flex-direction:column;gap:calc(var(--u)*.18)}',
+    /* submenus: categorias a esquerda, a pagina da categoria a direita */
+    '#gh-menus .st-body{flex:1 1 auto;display:grid;',
+    'grid-template-columns:calc(var(--u)*15) minmax(0,calc(var(--u)*42));justify-content:center;',
+    'gap:calc(var(--u)*3);margin-top:calc(var(--u)*1.4);min-height:0}',
+    '#gh-menus .st-cats{display:flex;flex-direction:column;gap:calc(var(--u)*.3);min-height:0}',
+    '#gh-menus .st-cat{position:relative;padding:calc(var(--u)*.62) calc(var(--u)*1.0);cursor:pointer;',
+    'border-radius:calc(var(--u)*.36);border:1px solid transparent;',
+    'font-family:var(--f-display);font-weight:900;font-style:italic;text-transform:uppercase;',
+    'font-size:calc(var(--u)*1.2);letter-spacing:.04em;color:#8f98b4;',
+    'transition:background .16s ease,border-color .16s ease,color .16s ease,',
+    'transform .18s cubic-bezier(.2,1.4,.4,1)}',
+    /* categoria aberta (o foco esta dentro da pagina dela) */
+    '#gh-menus .st-cat.on{color:#e8ecfa;background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.12)}',
+    '#gh-menus .st-cat.on::before{content:"";position:absolute;left:calc(var(--u)*-.55);top:22%;bottom:22%;',
+    'width:3px;border-radius:2px;background:linear-gradient(180deg,var(--gold),var(--mag))}',
+    '#gh-menus .st-cat.foc{color:#fff;background:linear-gradient(100deg,rgba(72,40,28,.62),rgba(24,14,32,.42));',
+    'border-color:rgba(255,190,110,.36);transform:translateX(calc(var(--u)*.25))}',
+    '#gh-menus .st-cat.st-reset{margin-top:auto;font-family:var(--f-ui);font-style:normal;font-weight:800;',
+    'font-size:calc(var(--u)*.7);letter-spacing:.2em;color:var(--ink-faint)}',
+    '#gh-menus .st-cat.st-reset.foc{color:#ffb0a0;border-color:rgba(255,120,100,.4);',
+    'background:linear-gradient(100deg,rgba(88,22,26,.6),rgba(30,10,16,.4))}',
+    '#gh-menus .st-catmsg{min-height:calc(var(--u)*1.2);padding:0 calc(var(--u)*1.0);',
+    'font-size:calc(var(--u)*.66);color:var(--ink-faint);opacity:0;transition:opacity .3s ease}',
+    '#gh-menus .st-pages{position:relative;min-height:0;transition:opacity .18s ease}',
+    /* na lista de categorias a pagina e so uma previa */
+    '#gh-menus .st-pages.preview{opacity:.6}',
+    '#gh-menus .st-page{display:none;height:100%;flex-direction:column;gap:calc(var(--u)*.18)}',
+    '#gh-menus .st-page.on{display:flex}',
+    '#gh-menus .hints .hgrp{display:contents}',
     '#gh-menus .st-h{font-size:calc(var(--u)*.68);letter-spacing:.28em;text-transform:uppercase;',
     'font-weight:800;color:var(--cyan);margin:calc(var(--u)*.75) 0 calc(var(--u)*.35);',
     'display:flex;align-items:center;gap:calc(var(--u)*.55)}',
@@ -3525,10 +3562,26 @@
     add(headL, mk('h2', null, 'Configurações'));
     var headR = add(head, mk('div', 'right', 'tudo é salvo automaticamente'));
 
+    /* SUBMENUS. A tela tinha tres colunas com tudo de uma vez — grande demais.
+       Agora: categorias a esquerda, so a categoria em foco a direita. Na lista
+       de categorias, ↑↓ escolhe (a direita ja mostra a pagina) e Enter/→
+       entra; dentro da pagina, Esc volta para a lista. Cada pagina tem a sua
+       lista de itens (PL[k]); s.items aponta para a lista em uso. */
     var body = add(pane, mk('div', 'st-body'));
-    var col1 = add(body, mk('div', 'st-col'));
-    var col2 = add(body, mk('div', 'st-col'));
-    var col3 = add(body, mk('div', 'st-col'));
+    var catsEl = add(body, mk('div', 'st-cats'));
+    var pagesEl = add(body, mk('div', 'st-pages'));
+    var CATS = [
+      { k: 'audio', l: 'Áudio' }, { k: 'video', l: 'Vídeo' }, { k: 'controles', l: 'Controles' },
+      { k: 'jogo', l: 'Jogo' }, { k: 'calib', l: 'Calibração' }
+    ];
+    var P = {}, PL = {}, CI = {};          /* pagina, lista de itens e indice por categoria */
+    for (var ci = 0; ci < CATS.length; ci++) {
+      var pgEl = add(pagesEl, mk('div', 'st-page'));
+      add(pgEl, mk('div', 'st-h', esc(CATS[ci].l)));
+      P[CATS[ci].k] = pgEl; PL[CATS[ci].k] = []; CI[CATS[ci].k] = ci;
+    }
+    /* as linhas criadas a seguir entram na lista da pagina k */
+    function building(k) { s.items = PL[k]; return P[k]; }
 
     var rows = [];
 
@@ -3630,6 +3683,7 @@
           if (!hit) return;
           ev.preventDefault();
           ev.stopPropagation();
+          ensureList(s, it);
           setFocus(s, it.index, false);
           if (def.kind === 'choice') {
             var rc = hit.getBoundingClientRect();
@@ -3656,21 +3710,21 @@
       return def;
     }
 
-    /* ---- COLUNA 1: calibracao + audio -------------------------------- */
-    add(col1, mk('div', 'st-h', 'Calibração de latência'));
-    row(col1, {
+    /* ---- CALIBRACAO ---------------------------------------------------- */
+    var pgCal = building('calib');
+    row(pgCal, {
       label: 'Atraso do áudio', kind: 'slider', min: -300, max: 300, step: 5, bipolar: true,
       get: function () { return setting('audioOffsetMs', 0); },
       set: function (v) { setSetting('audioOffsetMs', v); },
       fmt: function (v) { return (v > 0 ? '+' : '') + Math.round(v) + ' ms'; }
     });
-    row(col1, {
+    row(pgCal, {
       label: 'Atraso do vídeo', kind: 'slider', min: -300, max: 300, step: 5, bipolar: true,
       get: function () { return setting('videoOffsetMs', 0); },
       set: function (v) { setSetting('videoOffsetMs', v); },
       fmt: function (v) { return (v > 0 ? '+' : '') + Math.round(v) + ' ms'; }
     });
-    var metroRow = row(col1, {
+    var metroRow = row(pgCal, {
       label: 'Teste de metrônomo', kind: 'action',
       hint: 'iniciar',
       get: function () { return metro.on; },
@@ -3687,7 +3741,7 @@
         updateMetroInfo();
       }
     });
-    var metroBox = add(col1, mk('div', 'metro'));
+    var metroBox = add(pgCal, mk('div', 'metro'));
     var beatsEl = add(metroBox, mk('div', 'beats'));
     var beatDots = [];
     for (var bi = 0; bi < 4; bi++) beatDots.push(add(beatsEl, mk('i', 'bt')));
@@ -3706,7 +3760,7 @@
     }
     updateMetroInfo();
 
-    row(col1, {
+    row(pgCal, {
       label: 'Aplicar desvio medido', kind: 'action', hint: 'aplicar',
       get: function () { return 0; }, set: function () {},
       onAct: function () {
@@ -3727,14 +3781,14 @@
        quem para o teste e o Esc (ja tratado em onBack e no globalKeyCapture),
        e as batidas medidas sobrevivem para a linha "Aplicar desvio medido". */
 
-    add(col1, mk('div', 'st-h', 'Volumes'));
+    var pgAud = building('audio');
     var BUSES = [
       { k: 'master', l: 'Geral' }, { k: 'music', l: 'Música' }, { k: 'guitar', l: 'Guitarra' },
       { k: 'drums', l: 'Bateria' }, { k: 'sfx', l: 'Efeitos' }, { k: 'crowd', l: 'Plateia' }
     ];
     for (var vb = 0; vb < BUSES.length; vb++) {
       (function (b) {
-        row(col1, {
+        row(pgAud, {
           label: b.l, kind: 'slider', min: 0, max: 1, step: 0.05,
           get: function () { return setting('volumes.' + b.k, 0.8); },
           set: function (v) { setSetting('volumes.' + b.k, v); },
@@ -3747,7 +3801,7 @@
        motor sempre teve os tres modos, mas nenhuma tela deixava escolher:
        quem ouvia o som cortar nao tinha o que fazer. O AudioContext so aceita
        o modo na criacao, entao a troca vale depois de recarregar a pagina. */
-    row(col1, {
+    row(pgAud, {
       label: 'Saída de áudio', kind: 'choice',
       options: [{ v: 'interactive', label: 'Rápida' }, { v: 'balanced', label: 'Equilibrada' },
                 { v: 'playback', label: 'Estável' }],
@@ -3759,13 +3813,13 @@
       }
     });
 
-    /* ---- COLUNA 2: video + jogo -------------------------------------- */
-    add(col2, mk('div', 'st-h', 'Vídeo'));
+    /* ---- VIDEO e JOGO -------------------------------------------------- */
+    var pgVid = building('video');
     /* Tres niveis, um por tipo de PC. Sem escolha do jogador vale a sugestao
        do GH.Engine para esta maquina (placa, nucleos, memoria); escolher aqui
        grava qualityChosen e a escolha passa a valer em toda abertura. */
     var Q_LABEL = { low: 'Leve', med: 'Média', high: 'Alta' };
-    row(col2, {
+    row(pgVid, {
       label: 'Qualidade', kind: 'choice',
       options: [{ v: 'low', label: Q_LABEL.low }, { v: 'med', label: Q_LABEL.med }, { v: 'high', label: Q_LABEL.high }],
       get: function () { var q = setting('quality', 'high'); return Q_LABEL[q] ? q : 'high'; },
@@ -3779,17 +3833,17 @@
         return sq === v ? 'sugerida' : 'sugerida: ' + Q_LABEL[sq];
       }
     });
-    row(col2, {
+    row(pgVid, {
       label: 'Flash no acerto', kind: 'toggle',
       get: function () { return !!setting('hitFlash', true); },
       set: function (v) { setSetting('hitFlash', v); }
     });
-    row(col2, {
+    row(pgVid, {
       label: 'Mostrar FPS', kind: 'toggle',
       get: function () { return !!setting('showFPS', false); },
       set: function (v) { setSetting('showFPS', v); }
     });
-    row(col2, {
+    row(pgVid, {
       label: 'Plateia 3D', kind: 'toggle',
       get: function () { return !!setting('crowd3D', true); },
       set: function (v) {
@@ -3801,44 +3855,45 @@
        ja faz esse papel, e a chave salva desligada deixava o titulo mudo sem
        o jogador lembrar por que. */
 
-    add(col2, mk('div', 'st-h', 'Jogo'));
-    row(col2, {
+    var pgJogo = building('jogo');
+    row(pgJogo, {
       label: 'Velocidade da pista', kind: 'slider', min: 6, max: 32, step: 1,
       get: function () { return setting('scrollSpeed', 14); },
       set: function (v) { setSetting('scrollSpeed', v); try { if (GH.Chart) GH.Chart.speed = v; } catch (e) {} },
       fmt: function (v) { return Math.round(v) + ' u/s'; }
     });
-    row(col2, {
+    row(pgJogo, {
       label: 'Dificuldade preferida', kind: 'choice',
       options: [{ v: 'facil', label: 'Fácil' }, { v: 'medio', label: 'Médio' },
                 { v: 'dificil', label: 'Difícil' }, { v: 'guitarrada', label: 'Guitarrada' }],
       get: function () { return setting('difficulty', 'medio'); },
       set: function (v) { setSetting('difficulty', v); selectedDifficulty = v; }
     });
-    row(col2, {
+    row(pgJogo, {
       label: 'Modo treino (sem falhar)', kind: 'toggle',
       get: function () { return !!setting('noFail', false); },
       set: function (v) { setSetting('noFail', v); }
     });
-    row(col2, {
+    row(pgJogo, {
       label: 'Canhoto (inverte as raias)', kind: 'toggle',
       get: function () { return !!setting('lefty', false); },
       set: function (v) { setSetting('lefty', v); }
     });
-    row(col2, {
+    row(pgJogo, {
       label: 'Inverter palhetada', kind: 'toggle',
       get: function () { return !!setting('invertStrum', false); },
       set: function (v) { setSetting('invertStrum', v); }
     });
-    row(col2, {
+    building('audio');
+    row(pgAud, {
       label: 'Reverb', kind: 'choice',
       options: [{ v: 'clube', label: 'Clube' }, { v: 'arena', label: 'Arena' }],
       get: function () { return setting('reverbIR', 'clube'); },
       set: function (v) { setSetting('reverbIR', v); call('Audio', 'setReverbIR', v); }
     });
 
-    /* ---- COLUNA 3: controles ---------------------------------------- */
-    add(col3, mk('div', 'st-h', 'Controles'));
+    /* ---- CONTROLES ----------------------------------------------------- */
+    var pgCtl = building('controles');
     var BINDS = [
       { a: 'fret0', l: 'Raia 1 · verde' }, { a: 'fret1', l: 'Raia 2 · vermelho' },
       { a: 'fret2', l: 'Raia 3 · amarelo' }, { a: 'fret3', l: 'Raia 4 · azul' },
@@ -3851,7 +3906,7 @@
     for (var kb = 0; kb < BINDS.length; kb++) {
       BIND_LABEL[BINDS[kb].a] = BINDS[kb].l;
       (function (b) {
-        row(col3, {
+        row(pgCtl, {
           label: b.l, kind: 'key', action: b.a,
           get: function () { return bindingLabel(b.a); },
           set: function () {},
@@ -3859,7 +3914,7 @@
         });
       })(BINDS[kb]);
     }
-    row(col3, {
+    row(pgCtl, {
       label: 'Restaurar teclas padrão', kind: 'action', hint: 'restaurar',
       get: function () { return 0; }, set: function () {},
       onAct: function () {
@@ -3868,13 +3923,9 @@
         refreshAll();
       }
     });
-    row(col3, {
-      label: 'Restaurar tudo', kind: 'action', hint: 'padrão',
-      get: function () { return 0; }, set: function () {},
-      onAct: function () { call('Settings', 'reset'); refreshAll(); }
-    });
+    /* "Restaurar tudo" mora na lista de categorias (vale para todas) */
 
-    keyMsg = add(col3, mk('div', 'st-keymsg', ''));
+    keyMsg = add(pgCtl, mk('div', 'st-keymsg', ''));
 
     /* ---- captura de tecla --------------------------------------------------
        POR QUE ACRESCENTAR EM VEZ DE SUBSTITUIR
@@ -4038,45 +4089,111 @@
       return true;
     };
 
-    var n1 = add(col1, mk('div', 'st-note'));
-    n1.innerHTML = '<span class="t">Como calibrar</span>' +
+    function note(k, html) { add(P[k], mk('div', 'st-note')).innerHTML = html; }
+    note('calib', '<span class="t">Como calibrar</span>' +
       'Ligue o metrônomo e toque <b>Enter</b> junto com a batida umas dez vezes — ' +
       'com o teste ligado, <b>Enter</b> é sempre batida. Aperte <b>Esc</b> para parar ' +
       '(a medida fica guardada) e depois <b>aplicar desvio medido</b>: ' +
-      'o jogo compensa sozinho.<br>' +
-      '<b>Saída de áudio</b>: <b>Estável</b> (padrão) dá folga contra cortes; ' +
-      '<b>Rápida</b> tem menos atraso, mas pode picotar. Vale após recarregar (F5).';
-    var n2 = add(col2, mk('div', 'st-note'));
-    n2.innerHTML = '<span class="t">Qualidade</span>' +
+      'o jogo compensa sozinho.');
+    note('audio', '<span class="t">Saída de áudio</span>' +
+      '<b>Estável</b> (padrão) dá folga contra cortes; <b>Rápida</b> tem menos atraso, ' +
+      'mas pode picotar. Vale após recarregar (F5). Volume 0 cala o canal por completo.');
+    note('video', '<span class="t">Qualidade</span>' +
       '<b>Leve</b>: PC fuleiro ou notebook simples — resolução menor, sem sombra. ' +
       '<b>Média</b>: PC comum. <b>Alta</b>: PC bom, com placa de vídeo. ' +
       'O jogo sugere um nível pela placa deste PC e baixa sozinho se a música engasgar. ' +
-      'A pista fica legível em todos.';
-    var n3 = add(col3, mk('div', 'st-note'));
-    n3.innerHTML = '<span class="t">Controle</span>' +
+      'A pista fica legível em todos.');
+    note('controles', '<span class="t">Controle</span>' +
       'Nota = <b>traste</b> + <b>palhetada</b>: segure <b>A S D F G</b> e bata a ' +
       '<b>seta para baixo</b> (ou <b>Enter</b>). Segurar o traste sozinho só acende o aro.<br>' +
       'Remapear <b>soma</b> a tecla — as antigas continuam valendo. Aperte a mesma ' +
       'tecla de novo para tirá-la. ' +
-      '<span id="gh-pad-st">Guitarra USB e gamepad são reconhecidos automaticamente.</span>';
+      '<span id="gh-pad-st">Guitarra USB e gamepad são reconhecidos automaticamente.</span>');
+
+    /* ---- LISTA DE CATEGORIAS ------------------------------------------- */
+    var hubList = [];
+    s.items = hubList;
+    for (var cj = 0; cj < CATS.length; cj++) {
+      (function (c) {
+        c.el = add(catsEl, mk('div', 'st-cat', esc(c.l)));
+        item(s, c.el, { onConfirm: function () { openPage(c.k); } });
+      })(CATS[cj]);
+    }
+    var resetEl = add(catsEl, mk('div', 'st-cat st-reset', 'Restaurar tudo'));
+    var resetMsg = add(catsEl, mk('div', 'st-catmsg', ''));
+    var resetMsgT = 0;
+    item(s, resetEl, {
+      onConfirm: function () {
+        call('Settings', 'reset');
+        refreshAll();
+        resetMsg.textContent = 'Tudo de volta ao padrão.';
+        resetMsg.style.opacity = '1';
+        clearTimeout(resetMsgT);
+        resetMsgT = setTimeout(function () { resetMsg.style.opacity = '0'; }, 2600);
+      }
+    });
+
+    var curPage = CATS[0].k;
+    s.mode = 'hub';
+    function showPage(k) {
+      curPage = k;
+      for (var i = 0; i < CATS.length; i++) {
+        var on = CATS[i].k === k;
+        P[CATS[i].k].classList.toggle('on', on);
+        CATS[i].el.classList.toggle('on', on);
+      }
+    }
+    /* troca a lista em uso (lista de categorias <-> pagina); idx < 0 deixa o
+       foco para quem chamou (o mouse ja sabe em que item caiu) */
+    function setMode(mode, idx) {
+      var old = s.items[s.idx];
+      if (old && old.el) old.el.classList.remove('foc');
+      s.mode = mode;
+      s.items = (mode === 'hub') ? hubList : PL[curPage];
+      s.idx = 0;
+      pagesEl.classList.toggle('preview', mode === 'hub');
+      paintHints();
+      if (idx >= 0) setFocus(s, idx, false);
+    }
+    function openPage(k) { showPage(k); setMode('page', 0); }
+    s.openFocused = function () {
+      if (s.mode === 'hub' && s.idx < CATS.length) { openPage(CATS[s.idx].k); sfx('uiSelect'); }
+    };
+    s.useList = function (list) {
+      if (list === hubList) { setMode('hub', -1); return; }
+      for (var k in PL) {
+        if (Object.prototype.hasOwnProperty.call(PL, k) && PL[k] === list) { showPage(k); setMode('page', -1); return; }
+      }
+    };
+    /* na lista, passar por uma categoria ja mostra a pagina dela */
+    s.onFocus = function (it, i) {
+      if (s.mode === 'hub' && i < CATS.length) showPage(CATS[i].k);
+    };
 
     var foot = add(pane, mk('div', 'foot'));
     add(foot, mk('p', 'notice',
       'A calibração é o que faz um jogo de ritmo parecer justo: ajuste até a nota bater junto com o som.'));
-    add(add(foot, mk('div', 'hints',
-      '<span><b class="key">↑</b><b class="key">↓</b> linha</span>' +
-      '<span><b class="key">←</b><b class="key">→</b> valor</span>' +
-      '<span><b class="key">Enter</b> ativar</span>')), backHint(s));
+    var hintsEl = add(foot, mk('div', 'hints'));
+    var hintsTxt = add(hintsEl, mk('span', 'hgrp'));
+    add(hintsEl, backHint(s));
+    function paintHints() {
+      hintsTxt.innerHTML = (s.mode === 'hub')
+        ? '<span><b class="key">↑</b><b class="key">↓</b> categoria</span>' +
+          '<span><b class="key">Enter</b> abrir</span>'
+        : '<span><b class="key">↑</b><b class="key">↓</b> linha</span>' +
+          '<span><b class="key">←</b><b class="key">→</b> valor</span>' +
+          '<span><b class="key">Enter</b> ativar</span>';
+    }
 
-    s.parts = { cols: [col1, col2, col3], head: head, foot: foot, headR: headR };
+    s.parts = { cats: catsEl, pages: pagesEl, head: head, foot: foot, headR: headR };
     s.onEnter = function () {
       stopListening();
       refreshAll();
       headR.textContent = settingsReturn === 'pause' ? 'voltando para a pausa' : 'tudo é salvo automaticamente';
-      setFocus(s, 0, false);
+      showPage(CATS[0].k);
+      setMode('hub', 0);
       revealList([head], { delay: 0.02, dur: 0.5, dy: -14 });
-      revealList([col1, col2, col3], { delay: 0.08, step: 0.07, dur: 0.55, dy: 20 });
-      revealList([n1, n2, n3], { delay: 0.24, step: 0.05, dur: 0.5, dy: 14 });
+      revealList([catsEl, pagesEl], { delay: 0.08, step: 0.07, dur: 0.55, dy: 20 });
       revealList([foot], { delay: 0.32, dur: 0.5, dy: 12 });
     };
     s.onLeave = function () {
@@ -4096,6 +4213,8 @@
         if (metro.taps.length) setFocus(s, 3, false);
         return;
       }
+      /* dentro de uma categoria, Esc volta para a lista */
+      if (s.mode === 'page') { setMode('hub', CI[curPage]); return; }
       if (settingsReturn === 'pause') { showScreen('pause'); return; }
       emitChoose('title');
     };
@@ -4157,6 +4276,8 @@
     if (s.name === 'settings') {
       if (dir === 'up') setFocus(s, s.idx - 1, false);
       else if (dir === 'down') setFocus(s, s.idx + 1, false);
+      /* na lista de categorias, → abre a categoria (nunca o "Restaurar tudo") */
+      else if (s.mode === 'hub') { if (dir === 'right' && s.openFocused) s.openFocused(); }
       else nudge(s, it, dir === 'right' ? 1 : -1);
       return;
     }
