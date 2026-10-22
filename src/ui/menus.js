@@ -3328,6 +3328,18 @@
     'background:linear-gradient(90deg,var(--cyan),var(--gold));',
     'box-shadow:0 0 calc(var(--u)*.5) rgba(255,200,90,.6)}',
     '#gh-menus .bar.bi i{background:linear-gradient(90deg,#5ce0d8,#ffcf4a,#c98cff)}',
+    /* area de clique da barra: mais alta que a barra fina e um pouco alem das
+       pontas (clicar logo antes/depois crava 0%/100%); a margem negativa
+       devolve o espaco, o layout da linha nao muda */
+    '#gh-menus .barw{position:relative;display:block;padding:calc(var(--u)*.45) calc(var(--u)*.5);',
+    'margin:calc(var(--u)*-.45) calc(var(--u)*-.5);cursor:pointer;touch-action:none}',
+    '#gh-menus .kn{position:absolute;top:50%;display:block;width:calc(var(--u)*.74);height:calc(var(--u)*.74);',
+    'margin:calc(var(--u)*-.37) 0 0 calc(var(--u)*-.37);border-radius:50%;background:#aab3cc;',
+    'box-shadow:0 0 0 2px rgba(10,8,20,.85);transition:transform .12s ease,background .12s ease}',
+    '#gh-menus .srow.foc .kn{background:#fff;',
+    'box-shadow:0 0 0 2px rgba(10,8,20,.85),0 0 calc(var(--u)*.6) rgba(255,210,120,.9)}',
+    '#gh-menus .srow.drag .kn{transform:scale(1.3)}',
+    '#gh-menus .cyc{cursor:pointer}',
     '#gh-menus .barv{min-width:calc(var(--u)*3.1);text-align:right}',
     '#gh-menus .cyc{display:flex;align-items:center;gap:calc(var(--u)*.38);',
     'color:var(--ink-faint)}',
@@ -3489,9 +3501,12 @@
       function render() {
         var v = def.get();
         if (def.kind === 'slider') {
-          var t = clamp01((v - def.min) / (def.max - def.min));
-          sv.innerHTML = '<span class="bar' + (def.bipolar ? ' bi' : '') + '"><i style="width:' +
-            (t * 100).toFixed(1) + '%"></i></span><span class="barv">' + def.fmt(v) + '</span>';
+          var frac = clamp01((v - def.min) / (def.max - def.min));
+          /* a bolinha mede so a barra, descontando o respiro lateral de .barw */
+          sv.innerHTML = '<span class="barw"><span class="bar' + (def.bipolar ? ' bi' : '') + '"><i style="width:' +
+            (frac * 100).toFixed(1) + '%"></i></span>' +
+            '<b class="kn" style="left:calc(var(--u)*.5 + (100% - var(--u))*' + frac.toFixed(4) + ')"></b></span>' +
+            '<span class="barv">' + def.fmt(v) + '</span>';
         } else if (def.kind === 'choice') {
           var lbl = v;
           for (var i = 0; i < def.options.length; i++) if (def.options[i].v === v) lbl = def.options[i].label;
@@ -3536,6 +3551,57 @@
       });
       def.item = it;
       rows.push(def);
+
+      /* Mouse (e toque) nas barras: clicar leva o valor ao ponto clicado e
+         arrastar acompanha. Nas escolhas, clicar na metade esquerda/direita
+         do seletor volta/avanca uma opcao. O preventDefault do pointerdown
+         segura o mousedown do item(): a linha ganha foco aqui mesmo, sem o
+         "confirmar" dele (que numa barra nao faz nada). */
+      if (def.kind === 'slider' || def.kind === 'choice') {
+        var lastBlip = 0;
+        var slideTo = function (x) {
+          var bar = sv.querySelector('.bar');
+          if (!bar) return;
+          var rc = bar.getBoundingClientRect();
+          var u = clamp01((x - rc.left) / Math.max(1, rc.width));
+          var nv = def.min + Math.round(u * (def.max - def.min) / def.step) * def.step;
+          nv = Math.round(clamp(nv, def.min, def.max) * 1000) / 1000;
+          if (nv === def.get()) return;
+          def.set(nv);
+          render();
+          /* som de passo, mas sem metralhar durante o arraste */
+          var tn = Date.now();
+          if (tn - lastBlip > 70) { lastBlip = tn; sfx('uiMove'); }
+        };
+        sv.addEventListener('pointerdown', function (ev) {
+          if (current !== s || ev.button !== 0) return;
+          var hit = ev.target.closest(def.kind === 'slider' ? '.barw' : '.cyc');
+          if (!hit) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          setFocus(s, it.index, false);
+          if (def.kind === 'choice') {
+            var rc = hit.getBoundingClientRect();
+            nudge(s, it, ev.clientX < rc.left + rc.width / 2 ? -1 : 1);
+            return;
+          }
+          r.classList.add('drag');
+          /* captura no `sv`, que sobrevive ao render() (o render troca o
+             conteudo dele a cada passo) */
+          try { sv.setPointerCapture(ev.pointerId); } catch (e) { /* ok */ }
+          slideTo(ev.clientX);
+          var onMove = function (e2) { slideTo(e2.clientX); };
+          var onUp = function () {
+            r.classList.remove('drag');
+            sv.removeEventListener('pointermove', onMove);
+            sv.removeEventListener('pointerup', onUp);
+            sv.removeEventListener('pointercancel', onUp);
+          };
+          sv.addEventListener('pointermove', onMove);
+          sv.addEventListener('pointerup', onUp);
+          sv.addEventListener('pointercancel', onUp);
+        });
+      }
       return def;
     }
 
@@ -4074,20 +4140,55 @@
 
   /* =========================================================================
      19. FRISO MARAJOARA COMO MASCARA CSS
-     Reaproveita a textura ja gerada por GH.Materials (nao duplicamos nada).
+     Desenho proprio da interface: losangos concentricos encadeados entre
+     duas linhas-guia, geometria marajoara que continua nitida a 15 px de
+     altura. A faixa da pista (GH.Materials 'marajoaraBand') tem espirais
+     finas que, reduzidas a esse tamanho, viravam rabiscos com cara de
+     caractere quebrado embaixo do logo.
+     Ladrilho de 512x96 com 4 periodos: emenda sem costura no repeat-x.
      ========================================================================= */
+
+  function friezeDiamond(g, cx, cy, r, fill) {
+    g.beginPath();
+    g.moveTo(cx, cy - r); g.lineTo(cx + r, cy); g.lineTo(cx, cy + r); g.lineTo(cx - r, cy);
+    g.closePath();
+    if (fill) g.fill(); else g.stroke();
+  }
 
   function buildFriezeMask() {
     try {
-      var band = marajoaraCanvas();
-      if (!band) return '';
-      /* recorta a faixa central e reduz: mascara leve, sem serrilha */
-      var w = 512, h = 96;
+      var W = 512, H = 96, P = 128, mid = H / 2;
+      var BIG = 24, SMALL = 9, k;
       var cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
+      cv.width = W; cv.height = H;
       var g = cv.getContext('2d');
-      g.imageSmoothingEnabled = true;
-      g.drawImage(band, 0, band.height * 0.10, band.width, band.height * 0.80, 0, 0, w, h);
+      g.strokeStyle = '#fff';
+      g.fillStyle = '#fff';
+      g.lineJoin = 'miter';
+
+      /* linhas-guia */
+      g.lineWidth = 4;
+      g.beginPath();
+      g.moveTo(0, 14); g.lineTo(W, 14);
+      g.moveTo(0, H - 14); g.lineTo(W, H - 14);
+      g.stroke();
+
+      for (k = 0; k < W / P; k++) {
+        var x0 = k * P, cx = x0 + P / 2;
+        /* fio que liga o losango pequeno da emenda ao grande */
+        g.lineWidth = 4;
+        g.beginPath();
+        g.moveTo(x0 + SMALL, mid); g.lineTo(cx - BIG, mid);
+        g.moveTo(cx + BIG, mid); g.lineTo(x0 + P - SMALL, mid);
+        g.stroke();
+        /* losango grande vazado com miolo cheio */
+        g.lineWidth = 6;
+        friezeDiamond(g, cx, mid, BIG, false);
+        friezeDiamond(g, cx, mid, 9, true);
+        /* losango pequeno na emenda (metade em cada ponta do ladrilho) */
+        friezeDiamond(g, x0, mid, SMALL, true);
+        friezeDiamond(g, x0 + P, mid, SMALL, true);
+      }
       return 'url(' + cv.toDataURL('image/png') + ')';
     } catch (e) { return ''; }
   }
