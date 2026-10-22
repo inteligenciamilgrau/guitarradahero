@@ -548,7 +548,7 @@
 
   function checkFail() {
     if (S.failed) return;
-    if (setting('noFail', false)) return;
+    if (S.noFail || setting('noFail', false)) return;
     if (S.health > 0) return;
     S.health = 0;
     S.failed = true;
@@ -890,6 +890,7 @@
     /* --- configuracao --------------------------------------------------- */
     difficulty: '',
     autoPlay: false,     // bot: acerta tudo sozinho (demo / modo captura)
+    noFail: false,       // partida sem fracasso por conta do jogo (tutorial)
     autoSfx: false,      // o roteamento de SFX pertence ao game.js
 
     /* ---------------------------------------------------------------------

@@ -1393,16 +1393,19 @@
     '#gh-menus .t-slogan .qq{color:var(--mag);font-size:1.25em;line-height:0;vertical-align:-.12em;opacity:.9}',
 
     /* ---------------------------- MENU ----------------------------- */
-    '#gh-menus .t-menu{position:relative;margin:calc(var(--u)*1.9) 0 0;display:flex;flex-direction:column;',
-    'align-items:center;gap:calc(var(--u)*.30)}',
+    /* Quatro opcoes (Jogar, Tutorial, Opcoes, Creditos) cabem acima do selo
+       do estudio so com o espacamento enxuto: margem, vao e respiro de cada
+       item foram medidos para a ultima opcao nao encostar no selo. */
+    '#gh-menus .t-menu{position:relative;margin:calc(var(--u)*1.3) 0 0;display:flex;flex-direction:column;',
+    'align-items:center;gap:calc(var(--u)*.18)}',
     '#gh-menus .t-menu::before{content:"";position:absolute;left:-38%;right:-38%;top:-22%;bottom:-18%;',
     'z-index:-1;pointer-events:none;',
     'background:radial-gradient(52% 56% at 50% 50%,rgba(3,2,9,.86) 0%,rgba(3,2,9,.62) 44%,rgba(3,2,9,0) 76%)}',
     '#gh-menus .t-item{position:relative;display:flex;align-items:baseline;justify-content:center;',
-    'gap:calc(var(--u)*.85);padding:calc(var(--u)*.36) calc(var(--u)*2.6);cursor:pointer;',
+    'gap:calc(var(--u)*.85);padding:calc(var(--u)*.24) calc(var(--u)*2.6);cursor:pointer;',
     'transition:transform .22s cubic-bezier(.2,1.4,.4,1),filter .22s ease}',
     '#gh-menus .t-item .lbl{font-family:var(--f-display);font-weight:900;font-style:italic;',
-    'font-size:calc(var(--u)*2.15);letter-spacing:.035em;text-transform:uppercase;color:#b9c2dc;',
+    'font-size:calc(var(--u)*2.0);letter-spacing:.035em;text-transform:uppercase;color:#b9c2dc;',
     'text-shadow:0 calc(var(--u)*.1) 0 rgba(0,0,0,.85),0 calc(var(--u)*.35) calc(var(--u)*.9) rgba(0,0,0,.7);',
     'transition:color .2s ease}',
     '#gh-menus .t-item .sub{font-size:calc(var(--u)*.70);font-weight:700;letter-spacing:.24em;',
@@ -1448,7 +1451,7 @@
        numa "linha de credito", que e como um selo de publisher se comporta. */
     /* Centralizado por flex e NAO por translateX(-50%): revealList() escreve
        em `transform` durante a entrada e apagaria a centralizacao. */
-    '#gh-menus .t-pub{position:absolute;left:0;right:0;bottom:calc(var(--u)*6.0);',
+    '#gh-menus .t-pub{position:absolute;left:0;right:0;bottom:calc(var(--u)*5.4);',
     'display:flex;align-items:center;justify-content:center;gap:calc(var(--u)*1.25);',
     'opacity:.94;pointer-events:none}',
     '#gh-menus .t-pub::before,#gh-menus .t-pub::after{content:"";display:block;flex:0 0 auto;',
@@ -1461,6 +1464,7 @@
 
   var TITLE_ITEMS = [
     { label: 'Jogar', sub: 'escolher música', action: 'songselect' },
+    { label: 'Tutorial', sub: 'aprenda a tocar', action: 'tutorial' },
     { label: 'Opções', sub: 'calibrar e ajustar', action: 'settings' },
     { label: 'Créditos', sub: 'homenagens', action: 'credits' }
   ];
@@ -4280,6 +4284,9 @@
       if (DIFF_INFO[d]) selectedDifficulty = d;
       return selectedDifficulty;
     },
+    /* rotulo humano de um KeyboardEvent.code (o tutorial mostra as teclas
+       do jogador com o mesmo nome que a tela de controles usa) */
+    keyLabel: keyLabel,
     /* usados por ferramentas de captura/depuracao */
     settle: settleTweens,
     coverCanvas: coverOf,

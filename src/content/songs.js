@@ -2052,6 +2052,13 @@
 
     if (!leadSelection) leadSelection = allEvents || [];
 
+    return assembleSong(def, tl, leadSelection, charts, chartStats, spPhrases, validation);
+  }
+
+  // O objeto publico de musica — o mesmo formato para as seis musicas e para
+  // as musicas sob medida de compose().
+  function assembleSong(def, tl, leadSelection, charts, chartStats, spPhrases, validation) {
+    var i;
     var sections = [];
     for (i = 0; i < tl.sections.length; i++) {
       var s = tl.sections[i];
@@ -2103,6 +2110,71 @@
   }
 
   /* ===========================================================================
+     19B. MUSICA SOB MEDIDA (usada pelo tutorial)
+     O tutorial precisa de notas EXATAS — quatro verdes, depois um bastao —,
+     coisa que o compositor procedural nao faz. compose() monta uma musica
+     completa em volta de um chart escrito a mao: linha do tempo, harmonia e o
+     arranjo do GH.Synth saem do mesmo pipeline das seis musicas, e a guitarra
+     toca exatamente as gems do chart (raia -> nota do acorde do compasso).
+
+       def   = campos de musica (id, title, bpm, key, instruments...) com
+               sections: [[nome, compassos, cifras, opts], ...]
+       notes = [{ t, lane, dur, open, sp }] em segundos — o mesmo chart vale
+               para as quatro dificuldades.
+     =========================================================================== */
+
+  function composeSong(def, notes) {
+    var d = {}, k, i, j;
+    for (k in def) if (Object.prototype.hasOwnProperty.call(def, k)) d[k] = def[k];
+    d.sections = [];
+    for (i = 0; i < def.sections.length; i++) {
+      var sd = def.sections[i];
+      d.sections.push(S(sd[0], sd[1], sd[2], sd[3]));
+    }
+    var tl = buildTimeline(d);
+    var scale = SCALES[d.scale] || SCALES.major;
+
+    var chart = [];
+    for (i = 0; i < notes.length; i++) {
+      var n = notes[i];
+      chart.push({
+        t: round4(n.t), lane: n.open ? 0 : clamp(n.lane | 0, 0, 4), dur: round4(n.dur || 0),
+        hopo: false, tap: false, open: !!n.open, sp: !!n.sp, midi: 60
+      });
+    }
+    chart.sort(function (a, b) { return a.t - b.t || a.lane - b.lane; });
+
+    // Altura de cada ataque: as raias sobem pelas notas do acorde do compasso
+    // (arpejo dentro do registro da guitarra); o bastao e a fundamental grave.
+    var lead = [];
+    var groups = groupByTime(chart);
+    for (i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      var h = tl.harmony[clamp(Math.floor(g[0].t / tl.barSec + 1e-6), 0, tl.harmony.length - 1)];
+      var tones = [];
+      for (var m = 57; m <= 88; m++) if (h.pcs.indexOf(m % 12) >= 0) tones.push(m);
+      var lane = 4, dur = 0;
+      for (j = 0; j < g.length; j++) { lane = Math.min(lane, g[j].lane); dur = Math.max(dur, g[j].dur); }
+      var midi = g[0].open ? 40 + ((h.rootPc - 4) % 12 + 12) % 12 : tones[Math.min(lane + 1, tones.length - 1)];
+      for (j = 0; j < g.length; j++) g[j].midi = midi;
+      lead.push({
+        t: g[0].t, durSec: dur > 0 ? dur : tl.beatSec, midi: midi,
+        voicing: g[0].open ? 1 : g.length, open: g[0].open, tap: false,
+        accent: g.length > 1, strength: 8, sec: h.section, scale: scale, voiceDown: false
+      });
+    }
+
+    var charts = {}, chartStats = {}, spPhrases = {}, validation = {};
+    for (i = 0; i < DIFF_ORDER.length; i++) {
+      charts[DIFF_ORDER[i]] = chart;
+      chartStats[DIFF_ORDER[i]] = statsOf(chart, tl.musicEnd);
+      spPhrases[DIFF_ORDER[i]] = [];
+      validation[DIFF_ORDER[i]] = { custom: 1 };
+    }
+    return assembleSong(d, tl, lead, charts, chartStats, spPhrases, validation);
+  }
+
+  /* ===========================================================================
      20. EXPORTA GH.Songs
      =========================================================================== */
 
@@ -2128,6 +2200,10 @@
     guitarrada: DIFF_LABELS.guitarrada
   };
   songs.labelOf = function (diff) { return songs.difficultyLabels[diff] || diff; };
+
+  // Musica sob medida em volta de um chart escrito a mao (secao 19B). Nao
+  // entra na lista: quem compoe guarda a musica.
+  songs.compose = composeSong;
 
   // Diagnostico (usado pelas ferramentas de verificacao e pelo menu de debug).
   songs.report = function () {

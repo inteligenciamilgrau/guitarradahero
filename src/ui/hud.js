@@ -1626,8 +1626,10 @@
     if (!(songDuration > 0) && song && song.durationSec > 0) songDuration = song.durationSec;
 
     /* O lembrete "traste + palhetada" e cortesia de UMA vez por sessao: quem
-       ja passou pela primeira musica nao precisa mais dele no rodape. */
-    if (!tutSpent) { tutSpent = true; tutArmed = true; }
+       ja passou pela primeira musica nao precisa mais dele no rodape. Nas
+       licoes do tutorial ele so repetiria o que o proprio tutorial ensina —
+       a cortesia fica guardada para a primeira musica de verdade. */
+    if (!tutSpent && !(song && song.tutorial)) { tutSpent = true; tutArmed = true; }
 
     sections = (song && song.sections && song.sections.length) ? song.sections : null;
     secIdx = -1; secPop = 0;

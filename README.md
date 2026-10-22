@@ -23,6 +23,10 @@ Abra o `index.html` no navegador. É isso.
 
 Ou jogue direto pelo GitHub Pages (link na aba *About* do repositório).
 
+**Primeira vez?** Escolha **Tutorial** no menu principal: em uns três minutos
+ele ensina, tocando, os trastes, a palhetada, o bastão (nota aberta), as notas
+longas, os acordes e o Star Power.
+
 ### Controles
 
 | Ação | Tecla |
@@ -43,6 +47,10 @@ faz toda a diferença.
 - **6 músicas originais**, compostas proceduralmente em 6 gêneros brasileiros:
   guitarrada, carimbó, lambada, brega, frevo e samba-rock.
 - **4 dificuldades** por música — a mais difícil se chama **Guitarrada**.
+- **Tutorial interativo** em 8 lições curtas, com banda tocando junto: cada
+  lição só passa quando o jogador bate a meta, e um "treinador" explica cada
+  erro na hora (faltou palhetar, tecla errada, soltou cedo...). As teclas
+  mostradas são as que o jogador configurou.
 - **Toda a trilha é composta e sintetizada proceduralmente** no WebAudio:
   guitarra com distorção valvulada, wah, tremolo e delay slapback; baixo;
   bateria; percussão brasileira; órgão e naipe de metais. Um gerador offline

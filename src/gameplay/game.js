@@ -15,6 +15,7 @@
         GH.Highway.
      5. GH.Input -> julgamento, star power, pausa e navegacao de menu.
      6. forceState(cfg) — monta um estado arbitrario para o MODO CAPTURA.
+     7. Tutorial — empresta o palco ao GH.Tutorial (secao 8B).
 
    REGRA DE OURO: tudo que sai deste modulo passa por mcall(), que e uma
    chamada com guarda. Nenhum modulo ausente ou quebrado pode derrubar o jogo
@@ -83,6 +84,12 @@
   var countdownShown = -1;          /* ultimo numero de contagem exibido */
   var finishAt = -1;                /* quando abrir a tela de resultados */
   var running = false;              /* ha uma musica montada */
+
+  /* Tutorial: o GH.Tutorial conduz as licoes e o Game empresta o palco.
+     Guardamos a escolha do jogador para devolve-la quando o tutorial acabar
+     (as licoes passam por prepareSong e trocariam a musica do menu). */
+  var tutorial = false;
+  var tutorialReturn = null;
 
   /* Chamas por traste (o "combo fire" do Guitar Hero). */
   var flameUntil = [0, 0, 0, 0, 0];
@@ -367,6 +374,10 @@
       try { oldDef.exit(next); } catch (e) { warn('exit:' + state, e); }
     }
 
+    /* Saiu do palco (pausa -> sair, fim do tutorial...): o tutorial acaba
+       ANTES de a tela nova montar, para ela ja ver a musica do jogador. */
+    if (tutorial && next !== 'playing' && next !== 'countdown' && next !== 'paused') endTutorial();
+
     prevState = state;
     state = next;
     stateTime = 0;
@@ -413,8 +424,9 @@
 
     GH.Game.song = song;
     GH.Game.difficulty = difficulty;
+    /* licao do tutorial nao vira "ultima musica tocada" */
     try {
-      if (GH.Settings) {
+      if (GH.Settings && !song.tutorial) {
         if (typeof GH.Settings.set === 'function') {
           GH.Settings.set('lastSongId', song.id);
           GH.Settings.set('lastDifficulty', difficulty);
@@ -435,7 +447,11 @@
     /* chart + placar */
     mcall('Chart', 'load', song, difficulty);
     mcall('Scoring', 'reset', difficulty);
-    if (GH.Scoring) GH.Scoring.autoPlay = false;
+    if (GH.Scoring) {
+      GH.Scoring.autoPlay = false;
+      /* no tutorial ninguem e vaiado: errar faz parte de aprender */
+      GH.Scoring.noFail = !!song.tutorial;
+    }
 
     /* audio */
     mcall('Synth', 'prepare', song);
@@ -507,6 +523,8 @@
   }
 
   function restart() {
+    /* no tutorial, recomecar e refazer a licao — com a explicacao na frente */
+    if (tutorial) { mcall('Tutorial', 'restartLesson'); return true; }
     if (!song) return false;
     return startSong(song, difficulty);
   }
@@ -551,6 +569,75 @@
       if (GH.Songs && typeof GH.Songs.labelOf === 'function') return GH.Songs.labelOf(d);
     } catch (e) { /* fallback */ }
     return d;
+  }
+
+  /* =========================================================================
+     8B. TUTORIAL
+     O GH.Tutorial e dono das licoes; daqui ele so pega o palco emprestado:
+       startTutorial()      titulo -> tutorial (o menu chama)
+       clearStage(dress, d) palco sem musica entre uma licao e outra
+       startSong(licao)     cada licao e uma musica curta, com contagem
+       leaveTutorial(next)  fim: volta para o titulo ou para a selecao
+     Enquanto `tutorial` estiver ligado, o fim da musica nao abre resultados —
+     quem decide que a licao acabou e o GH.Tutorial.update().
+     ========================================================================= */
+
+  function startTutorial() {
+    if (!mhas('Tutorial', 'begin')) { warn('startTutorial', 'GH.Tutorial ausente'); return false; }
+    if (!tutorial) tutorialReturn = { song: song, difficulty: difficulty };
+    tutorial = true;
+    GH.Game.tutorial = true;
+    stats = null;
+    GH.Game.stats = null;
+    mcall('Tutorial', 'begin');
+    return true;
+  }
+
+  /* Palco sem musica: pista, HUD e banda de pe, mas sem notas e sem relogio.
+     Sem chart o GH.Scoring nao julga nada — nem palhetada a toa —, entao o
+     jogador aperta trastes e palheta a vontade enquanto le a licao. `dress`
+     veste o palco (tema e HUD) com uma musica sem toca-la, na dificuldade `d`. */
+  function clearStage(dress, d) {
+    if (d) { difficulty = resolveDifficulty(d); GH.Game.difficulty = difficulty; }
+    teardownSong(false);
+    mcall('Chart', 'unload');
+    mcall('Scoring', 'reset', difficulty);
+    mcall('Conductor', 'load', null);
+    if (dress) {
+      if (dress.palette) {
+        mcall('Palette', 'setTheme', dress.palette);
+        mcall('Highway', 'setTheme', dress.palette);
+        mcall('Stage', 'setTheme', dress.palette);
+      }
+      mcall('HUD', 'reset');
+      mcall('HUD', 'setSong', dress, difficulty);
+    }
+    if (state !== 'playing') setState('playing', { fromPause: true });
+    /* voltar ao 'playing' retoma o maestro; aqui o relogio fica parado */
+    mcall('Conductor', 'stop');
+  }
+
+  function leaveTutorial(next) {
+    /* o gancho de setState() encerra o tutorial */
+    setState(next === 'songselect' ? 'songselect' : 'title');
+  }
+
+  function endTutorial() {
+    if (!tutorial) return;
+    tutorial = false;
+    GH.Game.tutorial = false;
+    mcall('Tutorial', 'end');
+    teardownSong(false);
+    if (GH.Scoring) GH.Scoring.noFail = false;
+    var back = tutorialReturn;
+    tutorialReturn = null;
+    if (back && back.song) {
+      song = back.song;
+      difficulty = back.difficulty;
+      GH.Game.song = song;
+      GH.Game.difficulty = difficulty;
+      if (song.palette) mcall('Palette', 'setTheme', song.palette);
+    }
   }
 
   /* =========================================================================
@@ -943,6 +1030,7 @@
           startSong(song, difficulty);
           break;
         case 'songselect': setState('songselect'); break;
+        case 'tutorial':   startTutorial(); break;
         case 'settings':   setState('settings'); break;
         case 'credits':    setState('credits'); break;
         case 'title': case 'quit': case 'exit': quit(); break;
@@ -1048,11 +1136,14 @@
       if (songTime >= -0.001) setState('playing');
     }
 
-    /* ---- 5. fim da musica ---- */
-    if (running && state === 'playing') {
+    /* ---- 5. fim da musica (no tutorial, quem encerra e a licao) ---- */
+    if (running && state === 'playing' && !tutorial) {
       var dur = songDuration();
       if (finishAt < 0 && dur > 0 && songTime >= dur) finishAt = songTime + OUTRO_SEC;
       if (finishAt > 0 && songTime >= finishAt && !capture) finishSong(false);
+    }
+    if (tutorial && (state === 'playing' || state === 'countdown')) {
+      mcall('Tutorial', 'update', dt, songTime);
     }
 
     /* ---- 6. espetaculo ---- */
@@ -1534,6 +1625,12 @@
     songs: function () { return GH.Songs || []; },
     difficulties: DIFFICULTIES.slice(),
     difficultyLabel: difficultyLabel,
+
+    /* tutorial (secao 8B) */
+    startTutorial: startTutorial,
+    clearStage: clearStage,
+    leaveTutorial: leaveTutorial,
+    tutorial: false,
 
     /* dados correntes */
     song: null,

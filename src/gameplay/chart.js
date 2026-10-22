@@ -629,7 +629,10 @@
       for (i = 0; i < gs.length; i++) if (gs[i].sp) { anySp = true; break; }
       var durationGuess = (song && song.durationSec) ||
                           (list.length ? list[list.length - 1].end : 0);
-      if (!anySp && this.autoStarPower) generateStarPower(gs, durationGuess);
+      /* Uma musica pode recusar o SP automatico (as licoes do tutorial: SP
+       * aparece so na licao de SP, nunca sorteado nas outras). */
+      var autoSp = this.autoStarPower && !(song && song.autoStarPower === false);
+      if (!anySp && autoSp) generateStarPower(gs, durationGuess);
       var phrases = buildPhrases(gs);
 
       /* 9. indice por raia (nextNoteIdx em O(log n)) ---------------------- */
